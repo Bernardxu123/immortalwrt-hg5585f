@@ -5,14 +5,17 @@
 # 执行时机：/etc/init.d/boot (START=10) → uci_apply_defaults
 #           → 早于 /etc/init.d/network (START=20)，所以改完 netifd 才起来。
 #
-# 执行顺序前提：
-#   1. /lib/preinit/82_config_generate 已经在 preinit 阶段用 board.json 生成了
-#      network（br-lan 含 lan1..lan4，wan=pon0/proto=dhcp）和 system。
-#   2. /etc/uci-defaults/15_odhcpd 已经在 15 号跑过；因为我们的
-#      /etc/config/dhcp 里带了 config odhcpd 段，它会直接 exit，不会强开 DHCP server。
+# 模式：HG5585F = PPPoE 主路由（不是透明桥）
+#   pon0.995  = 联通 INTERNET VLAN 995，PPPoE over VLAN
+#   br-lan    = lan1..4（不含 pon0.995）
+#   lan       = 192.168.31.1/24 + DHCP/RA
+#   wan6      = DHCPv6（联通有 IPv6）
 #
-# 本脚本做的事：把"通用 OpenWrt 默认"改造成"HG5585F 桥接 + 联通 10G-EPON"。
-# 身份数据（LOID / SN / MAC）不在这里写，刷完在 LuCI 里填。
+# 身份/账号不预置：
+#   - LOID / PON 板级数据刷完在 LuCI 填
+#   - PPPoE 账号密码刷完用 uci 或 LuCI 填（仓库是公开的，不能写进来）
+#
+# 撤销/改桥接：本脚本只跑一次；如需回退，见 README 的「桥接回退」。
 
 LOG=/tmp/hg5585f-setup.log
 : > "$LOG"
@@ -21,14 +24,13 @@ log() {
 	logger -t hg5585f-setup "$*"
 }
 
-VLAN_INTERNET=995      # 原厂 veip0_995_wan_conf：INTERNET / VLAN 995 / bridge
-LAN_ADDR=192.168.1.1   # 与现役一致，主路由 wan 侧挂 192.168.1.2/24 即可管理
+VLAN_INTERNET=995
+LAN_ADDR=192.168.31.1
+LAN_NETMASK=255.255.255.0
 
 # ---------------------------------------------------------------------------
-# 1. 重建 network.device：br-lan = lan1..4 + pon0.995
-#
-# config_generate 生成的是匿名 device 段（network.@device[N]），无法稳定寻址。
-# 全部删掉，改用命名段重建，后续维护/对比都直观。
+# 1. 重建 network.device
+#    br-lan 只含 lan1..4；pon0.995 只作为 WAN 的 802.1q 设备存在。
 # ---------------------------------------------------------------------------
 n=$(uci -q show network 2>/dev/null | grep -c '=device$')
 while [ "$n" -gt 0 ]; do
@@ -47,7 +49,6 @@ add_list network.br_lan.ports='lan1'
 add_list network.br_lan.ports='lan2'
 add_list network.br_lan.ports='lan3'
 add_list network.br_lan.ports='lan4'
-add_list network.br_lan.ports='pon0.995'
 
 set network.pon0_995='device'
 set network.pon0_995.name='pon0.995'
@@ -57,63 +58,88 @@ set network.pon0_995.vid='${VLAN_INTERNET}'
 EOF
 
 # ---------------------------------------------------------------------------
-# 2. lan：静态管理地址，不带网关/DNS，IPv6 全关
-#    没有网关 = 本机不会尝试把管理流量路由出去，也不会和主路由抢默认路由。
+# 2. lan：静态管理地址 + 下游 DHCP/RA
 # ---------------------------------------------------------------------------
 uci -q batch <<EOF
 set network.lan='interface'
 set network.lan.device='br-lan'
 set network.lan.proto='static'
 set network.lan.ipaddr='${LAN_ADDR}'
-set network.lan.netmask='255.255.255.0'
+set network.lan.netmask='${LAN_NETMASK}'
+set network.lan.delegate='1'
+set network.lan.ipv6='1'
+set network.lan.ip6assign='60'
 set network.lan.peerdns='0'
-set network.lan.delegate='0'
-set network.lan.ipv6='0'
 delete network.lan.gateway
 delete network.lan.dns
-delete network.lan.ip6assign
+delete network.lan.ifname
 delete network.lan.ip6hint
 delete network.lan.ip6ifaceid
 delete network.lan.ip6class
 delete network.lan.ip6prefix
-delete network.lan.ifname
 EOF
 
 # ---------------------------------------------------------------------------
-# 3. wan：保留接口但不上协议
-#    为什么保留而不是删掉：
-#      a) pon0 必须被 netifd 打开（proto none 也会 ip link set up），
-#         pon0 不 up 则 pon0.995 这个 8021q 子设备无法转发；
-#      b) 将来要切路由模式（光猫自己 PPPoE 顶替主路由），只需改一行
-#         uci set network.wan.proto='pppoe'，不用重建接口。
+# 3. wan：联通 PPPoE over VLAN 995
+#    账号密码刻意留空，刷完填：
+#      uci set network.wan.username='...'
+#      uci set network.wan.password='...'
+#      uci commit network && /etc/init.d/network restart
 # ---------------------------------------------------------------------------
 uci -q batch <<EOF
 set network.wan='interface'
-set network.wan.device='pon0'
-set network.wan.proto='none'
+set network.wan.device='pon0.995'
+set network.wan.proto='pppoe'
+set network.wan.ipv6='1'
 set network.wan.auto='1'
-set network.wan.ipv6='0'
+set network.wan.peerdns='1'
+set network.wan.mtu='1492'
+set network.wan.mru='1492'
+set network.wan.keepalive='5 5'
 delete network.wan.username
 delete network.wan.password
 delete network.wan.hostname
 delete network.wan.metric
-delete network.wan6
-delete network.wan6t
 EOF
 
 # ---------------------------------------------------------------------------
-# 4. 桥接 flow offload —— 本机型真正的性能优化点
-#
-# ponwrt 给 fw4 打了 001-add-bridge-flowtable-support.patch，会为
-# "防火墙 zone 之外的透明网桥"生成 table bridge fw4 / flowtable fb，
-# 并把 VLAN 桥端口（pon0.995）解析到物理 lower device（pon0）交给硬件卸载。
-# 这条通路需要：
-#   - kmod-nf-conntrack-bridge（已在 configs/hg5585f-build.config 里 pin 住）
-#   - firewall.@defaults[0].flow_offloading = 1
-#   - flow_offloading_hw = 1 才会带 flags offload（AN7581 PPE/L2B 硬件卸载）
-#
-# 若实测发现桥接吞吐反而下降（硬件卸载路径异常），先关 hw 只留软件 flowtable：
-#   uci set firewall.@defaults[0].flow_offloading_hw='0'
+# 4. wan6：PPPoE 上的 DHCPv6（联通 IPv6）
+# ---------------------------------------------------------------------------
+uci -q delete network.wan6
+uci -q batch <<EOF
+set network.wan6='interface'
+set network.wan6.device='@wan'
+set network.wan6.proto='dhcpv6'
+set network.wan6.reqaddress='try'
+set network.wan6.reqprefix='auto'
+set network.wan6.peerdns='1'
+set network.wan6.auto='1'
+EOF
+
+# ---------------------------------------------------------------------------
+# 5. DHCP / RA：现在是主路由，必须开
+#    静态租约（平板/小米 AP）在 files/etc/config/dhcp 里，脚本不覆盖。
+# ---------------------------------------------------------------------------
+uci -q batch <<EOF
+set dhcp.lan.ignore='0'
+set dhcp.lan.dhcpv4='server'
+set dhcp.lan.dhcpv6='server'
+set dhcp.lan.ra='server'
+set dhcp.lan.ndp='disabled'
+set dhcp.lan.start='100'
+set dhcp.lan.limit='150'
+set dhcp.lan.leasetime='12h'
+set dhcp.lan.ra_slaac='1'
+delete dhcp.lan.ra_flags
+add_list dhcp.lan.ra_flags='managed-config'
+add_list dhcp.lan.ra_flags='other-config'
+set dhcp.wan.ignore='1'
+EOF
+
+# ---------------------------------------------------------------------------
+# 6. 路由模式的 flow offload —— 这次真正有意义
+#    inet flowtable + AN7581 PPE 可以卸载 PPPoE（驱动支持 FLOW_ACTION_PPPOE_PUSH）
+#    注意：后续上 Passwall/OpenClash（tproxy）时可能需要关掉，见 README。
 # ---------------------------------------------------------------------------
 uci -q batch <<EOF
 set firewall.@defaults[0].flow_offloading='1'
@@ -121,13 +147,7 @@ set firewall.@defaults[0].flow_offloading_hw='1'
 EOF
 
 # ---------------------------------------------------------------------------
-# 5. WiFi 默认关闭
-#
-# 不只是 SSID 冲突：WiFi 桥进 br-lan 等于把无线客户端直接接到运营商二层域，
-# 客户端的 DHCP 广播会顺着 pon0.995 出去，事故面比有线更大。
-# 包和驱动都保留，需要时一行打开：
-#   uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'
-#   uci commit wireless; wifi up
+# 7. WiFi 默认关闭（小米 BE6500 Pro 继续做 AP）
 # ---------------------------------------------------------------------------
 if [ -x /sbin/wifi ]; then
 	/sbin/wifi config >/dev/null 2>&1
@@ -138,9 +158,7 @@ if [ -x /sbin/wifi ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. 时间同步与时区
-#    桥接模式下本机没有外网出口，NTP 只有在切路由模式后才真正生效，
-#    但配置先备好，避免将来切模式时再翻一遍。
+# 8. 时间同步与时区
 # ---------------------------------------------------------------------------
 uci -q batch <<EOF
 set system.@system[0].timezone='CST-8'
@@ -155,40 +173,36 @@ add_list system.ntp.server='cn.pool.ntp.org'
 EOF
 
 uci -q commit network
+uci -q commit dhcp
 uci -q commit firewall
 uci -q commit system
 
 # ---------------------------------------------------------------------------
-# 7. DHCP 安全兜底（第三重保险）
-#
-# /etc/config/dhcp 已经带 ignore=1，这里再强制一次并校验。
-# 之所以这么小心：br-lan 桥到 pon0.995，DHCP 报文会直接进联通接入网。
+# 9. 自检
 # ---------------------------------------------------------------------------
-uci -q set dhcp.lan.ignore='1'
-uci -q set dhcp.lan.dhcpv4='disabled'
-uci -q set dhcp.lan.dhcpv6='disabled'
-uci -q set dhcp.lan.ra='disabled'
-uci -q set dhcp.lan.ndp='disabled'
-uci -q commit dhcp
-
-if [ "$(uci -q get dhcp.lan.ignore)" != "1" ]; then
-	log "ERROR: dhcp.lan.ignore 未能设为 1，禁用 dnsmasq 兜底"
-	/etc/init.d/dnsmasq disable 2>/dev/null
+if [ "$(uci -q get network.wan.device)" = "pon0.995" ] &&
+   [ "$(uci -q get network.wan.proto)" = "pppoe" ]; then
+	log "OK: wan = pon0.995 / pppoe / mtu $(uci -q get network.wan.mtu)"
 else
-	log "OK: dhcp.lan.ignore=1（不会向 PON 侧发 DHCP）"
+	log "ERROR: wan 没有配置成 pon0.995/pppoe"
 fi
 
-# ---------------------------------------------------------------------------
-# 8. 自检：把结果写进日志，方便刷完第一时间确认
-# ---------------------------------------------------------------------------
 if uci -q get network.br_lan.ports | grep -qw 'pon0.995'; then
-	log "OK: br-lan 成员 = $(uci -q get network.br_lan.ports | tr '\n' ' ')"
+	log "ERROR: br-lan 里仍含 pon0.995，桥接会再次把 LAN 放进运营商二层"
 else
-	log "ERROR: br-lan 成员里没有 pon0.995，桥接不会通"
+	log "OK: br-lan 成员 = $(uci -q get network.br_lan.ports | tr '\n' ' ')"
 fi
 
-log "OK: pon mode=$(uci -q get pon.line0.mode) operator=$(uci -q get pon.line0_oam.operator) ge_ports=$(uci -q get pon.line0_oam.ge_ports)"
+if [ "$(uci -q get dhcp.lan.ignore)" = "0" ]; then
+	log "OK: lan DHCP/RA 已开启（192.168.31.0/24）"
+else
+	log "ERROR: dhcp.lan.ignore 不是 0，下游拿不到地址"
+fi
+
 log "OK: flow_offloading=$(uci -q get firewall.@defaults[0].flow_offloading) hw=$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
-log "待办：填 LOID / 上传 PON board data（见 /etc/motd）"
+[ -n "$(uci -q get network.wan.username)" ] || log "待办：network.wan.username/password（PPPoE 账号）"
+[ -n "$(uci -q get pon.line0_oam.loid)" ] || log "待办：pon.line0_oam.loid（LOID）"
+log "待办：上传 PON board data（1 MiB factory 镜像）"
+log "WiFi 默认关闭；小米 AP 继续做无线接入"
 
 exit 0

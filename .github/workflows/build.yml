@@ -101,15 +101,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            asciidoc autoconf automake autopoint bc binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler dos2unix \
+            dwarves file flex gawk \
             gettext git g++-multilib gcc-multilib gperf help2man intltool \
             libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
             libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
             libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
             python3 python3-docutils python3-pip python3-ply python3-pyelftools \
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+            uglifyjs unzip wget xmlto xxd xz-utils zip zlib1g-dev zstd
 
       # ---------------------------------------------------------------------
       # 缓存：只缓存 dl/ 和 .ccache。
@@ -117,29 +118,31 @@ jobs:
       # actions/cache 单仓库 10 GB 上限，而且解压比重编还慢。
       # ---------------------------------------------------------------------
       - name: 恢复 dl 缓存
-        uses: actions/cache@v4
+        id: dl-cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: ${{ env.SRC }}/dl
-          key: dl-${{ env.COMMIT }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          key: dl-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
           restore-keys: |
-            dl-${{ env.COMMIT }}-
             dl-
 
       - name: 恢复 ccache
-        uses: actions/cache@v4
+        id: ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
-          path: |
-            ${{ env.SRC }}/.ccache
-            ~/.ccache
-          key: cc-${{ env.COMMIT }}-${{ github.run_id }}
+          path: ${{ env.SRC }}/.ccache
+          key: cc-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}-${{ github.run_id }}
           restore-keys: |
-            cc-${{ env.COMMIT }}-
+            cc-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}-
             cc-
 
       - name: 初始化 ccache
         run: |
-          mkdir -p "$SRC/.ccache"
-          ccache -M 2G
+          export CCACHE_DIR="$SRC/.ccache"
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 8G
           ccache --set-config=compression=true || true
           ccache -s
 
@@ -197,7 +200,25 @@ jobs:
             make -j1 V=s 2>&1 | tee -a build.log || true
             exit 1
           fi
-          ccache -s || true
+          CCACHE_DIR="$SRC/.ccache" ccache -s || true
+
+      # actions/cache 的 Post 保存在 job 失败时会跳过；改用显式 save，失败也保住
+      # 已下载的源码包和已编译的 ccache，下一次重试不用从零开始。
+      - name: 保存 dl 缓存（失败也保存）
+        if: always() && steps.dl-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SRC }}/dl
+          key: dl-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+
+      - name: 保存 ccache（失败也保存）
+        if: always() && steps.ccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SRC }}/.ccache
+          key: cc-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}-${{ github.run_id }}
 
       - name: 收集并校验产物
         working-directory: ${{ env.SRC }}

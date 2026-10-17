@@ -2,7 +2,11 @@
  PonWrt  |  FiberHome HG5585F  (Airoha AN7581, 10G-EPON asymmetric)
  ==================================================================
 
- 首次使用，按顺序做完这 3 步：
+ 角色：PPPoE 主路由（不是透明桥）。
+   光纤 ── HG5585F ── lan1..4 ── 小米 BE6500 Pro（AP）/ PC / 平板
+   WAN = pon0.995（VLAN 995 / PPPoE）   LAN = 192.168.31.1/24 + DHCP/RA
+
+ 首次使用，按顺序做完这 4 步：
 
    [1] 填 LOID（网络 -> PON -> 配置）
        uci set pon.line0_oam.loid='<你的LOID>'
@@ -17,12 +21,21 @@
        必须是本机 factory 转出来的 1 MiB 镜像，含光模块校准(APONCAL)
        和 MT7916 WiFi EEPROM。每台设备唯一，不能借用别人的。
 
-   [3] 看状态
+   [3] 填 PPPoE 账号（联通）
+       uci set network.wan.username='<宽带账号>'
+       uci set network.wan.password='<宽带密码>'
+       uci commit network && /etc/init.d/network restart
+
+   [4] 看状态
+       ifstatus wan | grep -E 'up|address'
        cat /sys/kernel/debug/airoha-xpon-pon0/line
+       cat /sys/kernel/debug/airoha-xpon-pon0/registration
        logread -e pon-watchdog
 
- 当前拓扑：br-lan = lan1..4 + pon0.995（联通上网 VLAN 995）
-           管理地址 192.168.1.1/24，无 DHCP（避免把 DHCP 打进运营商网络）
-           WiFi 默认关闭：uci set wireless.radio0.disabled=0 && uci commit wireless && wifi up
+ 管理：http://192.168.31.1（LAN 内；运营商二层不再可达）
+ WiFi：默认关闭（小米 BE6500 Pro 继续做 AP）
+ 静态租约：默认动态；需要固定时在 LuCI -> DHCP/DNS 里按 MAC 添加
+ 看门狗：只拆 WAN 恢复，不碰 LAN；判据是 mpcp_timeouts + service_ready
+ 分流：OpenClash / Passwall 在下一版加入（先确认基础固件能拨号、能跑满）
 
  完整说明：README-HG5585F.md

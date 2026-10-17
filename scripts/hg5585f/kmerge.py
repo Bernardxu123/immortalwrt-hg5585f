@@ -90,11 +90,16 @@ WANT_Y = [
     "TARGET_ROOTFS_INITRAMFS",
     "TARGET_ROOTFS_SQUASHFS",
     "CCACHE",
+    "PACKAGE_zram-swap",
 ]
 WANT_UNSET = [
     # 不装 br_netfilter：它才是"桥接帧进 iptables"的元凶，
     # 与 nf_conntrack_bridge（桥接 conntrack + flowtable）是两回事
     "PACKAGE_kmod-br-netfilter",
+    # miniupnpd 2.3.11 + feed 补丁 020-descr-filter-fix.patch 已不匹配
+    "PACKAGE_luci-app-upnp",
+    "PACKAGE_miniupnpd-nftables",
+    "PACKAGE_kmod-airoha-en7572",
     "TARGET_airoha_an7583",
     "TARGET_airoha_en7523",
 ]

@@ -71,11 +71,18 @@ need_y PACKAGE_kmod-nft-offload
 # 它才是"桥接帧进 iptables"的元凶，跟 nf_conntrack_bridge 是两回事。
 need_unset PACKAGE_kmod-br-netfilter
 
+# ---- 6b. 不装 UPnP ----
+# 2026-10-17 miniupnpd 2.3.11 的 feed 补丁已失效，且代理出口不需要 UPnP。
+need_unset PACKAGE_luci-app-upnp
+need_unset PACKAGE_miniupnpd-nftables
+
 # ---- 7. PON 栈 ----
 need_y PACKAGE_kmod-airoha-xpon
 need_y PACKAGE_airoha-ponctl
 need_y PACKAGE_airoha-pond
 need_y PACKAGE_luci-app-pon
+# HG5585F 用 paged BOSA；EN7572 前端对它是多余驱动+固件
+need_unset PACKAGE_kmod-airoha-en7572
 
 # ---- 8. WiFi 硬件保留 ----
 need_y PACKAGE_kmod-mt7915e
@@ -90,6 +97,7 @@ need_y PACKAGE_ip-full
 [ "$SKIP_INITRAMFS_CHECK" = "1" ] || need_y TARGET_ROOTFS_INITRAMFS
 need_y TARGET_ROOTFS_SQUASHFS
 need_y CCACHE
+need_y PACKAGE_zram-swap
 
 # ---- 11. 不参与的 subtarget ----
 need_unset TARGET_airoha_an7583

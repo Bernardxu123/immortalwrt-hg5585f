@@ -1,17 +1,10 @@
-# HG5585F 桥接模式 DHCP 配置
+# HG5585F 主路由模式 DHCP / DNS 配置
 #
-# ⚠️ 核心安全约束
-# br-lan 的成员包含 pon0.995（运营商上网业务 VLAN 995），也就是说
-# 本机的 DHCP 广播 / IPv6 RA 会直接打进联通接入网。
-# OLT 侧普遍开 DHCP snooping + 端口绑定，ONT 口出现非授权 DHCP 服务器时
-# 轻则该 PON 口被 err-disable（整户断网，需要运营商侧恢复），
-# 重则 IP 冲突告警影响同一 PON 口的邻居。
-# 所以 lan 上必须：dhcpv4=disabled、dhcpv6=disabled、ra=disabled、ndp=disabled、ignore=1。
+# 角色：HG5585F = PPPoE 主路由，br-lan = lan1..4，LAN 192.168.31.0/24
+# 下游：小米 BE6500 Pro 继续做 AP；平板/PC 走 DHCP。
 #
-# 为什么保留 config odhcpd 段
-# /etc/uci-defaults/15_odhcpd（来自 odhcpd 包）在检测到 dhcp.odhcpd 已存在时会
-# 直接 exit 0，不再把 dhcp.lan.dhcpv4 强设为 server。少了这一段，
-# 它会在首次启动时把 DHCP server 重新打开。
+# 静态租约请刷完后在 LuCI / uci 里按需添加：
+#   不要把家里的设备 MAC 提交到公开仓库。
 
 config dnsmasq
 	option domainneeded '1'
@@ -34,14 +27,19 @@ config dnsmasq
 	option filter_aaaa '0'
 	option filter_a '0'
 
-# 桥接模式：lan 不提供任何地址服务（管理地址是静态 192.168.1.1）
 config dhcp 'lan'
 	option interface 'lan'
-	option ignore '1'
-	option dhcpv4 'disabled'
-	option dhcpv6 'disabled'
-	option ra 'disabled'
+	option start '100'
+	option limit '150'
+	option leasetime '12h'
+	option ignore '0'
+	option dhcpv4 'server'
+	option dhcpv6 'server'
+	option ra 'server'
 	option ndp 'disabled'
+	option ra_slaac '1'
+	list ra_flags 'managed-config'
+	list ra_flags 'other-config'
 
 config dhcp 'wan'
 	option interface 'wan'
