@@ -1,0 +1,28 @@
+
+ PonWrt  |  FiberHome HG5585F  (Airoha AN7581, 10G-EPON asymmetric)
+ ==================================================================
+
+ 首次使用，按顺序做完这 3 步：
+
+   [1] 填 LOID（网络 -> PON -> 配置）
+       uci set pon.line0_oam.loid='<你的LOID>'
+       uci commit pon && /etc/init.d/pon reload
+
+       确认 line mode = epon-10g-1g / OAM = ctc
+       不注册就 A/B 到 ieee：
+       uci set pon.line0_oam.operator='ieee'
+       uci commit pon && /etc/init.d/pon reload
+
+   [2] 上传 PON board data（网络 -> PON -> PON board data）
+       必须是本机 factory 转出来的 1 MiB 镜像，含光模块校准(APONCAL)
+       和 MT7916 WiFi EEPROM。每台设备唯一，不能借用别人的。
+
+   [3] 看状态
+       cat /sys/kernel/debug/airoha-xpon-pon0/line
+       logread -e pon-watchdog
+
+ 当前拓扑：br-lan = lan1..4 + pon0.995（联通上网 VLAN 995）
+           管理地址 192.168.1.1/24，无 DHCP（避免把 DHCP 打进运营商网络）
+           WiFi 默认关闭：uci set wireless.radio0.disabled=0 && uci commit wireless && wifi up
+
+ 完整说明：README-HG5585F.md

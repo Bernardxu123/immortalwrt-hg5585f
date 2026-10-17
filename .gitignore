@@ -13,7 +13,11 @@
 /logs
 /feeds
 /feeds.conf
-/files
+# 本 fork 把 files/ 作为**受版本管理**的板级 overlay（HG5585F 的首启注入、看门狗、
+# 静态 config 都在里面）。上游默认忽略它，因为上游用户是用 files/ 做本地临时覆盖；
+# 我们是靠它承载机型适配，所以必须进版本库。
+# 将来 merge 上游时如果这一行被改回 /files，把改动保留成注释即可。
+#/files
 /target/linux/feeds
 /overlay
 /package/feeds

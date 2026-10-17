@@ -1,0 +1,246 @@
+name: build-hg5585f
+
+# 只编 FiberHome HG5585F 的 CT + CU 两个 profile（上游默认 12 个）。
+# 产物：fiberhome_hg5585f-{cu,ct} 的 sysupgrade.itb + recovery.itb。
+#
+# 触发方式：
+#   * 手动 workflow_dispatch（推荐：先看 master 上的改动再决定编不编）
+#   * push tag v*（打 tag 才出"正式"固件——master 随时可能跟到上游半成品状态）
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_recovery:
+        description: '同时产出 recovery.itb（initramfs 救援镜像，约多 10-16 分钟）'
+        type: boolean
+        default: true
+      make_release:
+        description: '把产物发布为 GitHub Release'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-hg5585f-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: an7581 / HG5585F CT+CU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      # ---------------------------------------------------------------------
+      # 这个仓库本身就是完整的 ponwrt（fork），所以 checkout 就是取源码树
+      # ---------------------------------------------------------------------
+      - name: 检出源码
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: 记录版本信息
+        run: |
+          git log -1 --format='%H %ad %s' --date=iso
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # 磁盘是唯一能真正搞死 OpenWrt 构建的风险：
+      # ubuntu-24.04 runner 的 / 清理后约 20-29 GB，an7581 全量编译实测 15-22 GB。
+      # 三层防御：清理 → 切 /mnt 大盘 → 28 GB 硬闸门
+      # ---------------------------------------------------------------------
+      - name: 清理磁盘
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+                      /usr/lib/jvm /usr/local/.ghcup /opt/az
+          sudo apt-get purge -y '^dotnet-.*' '^llvm-.*' '^php.*' '^mongodb-.*' '^mysql-.*' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean
+          docker image prune -af 2>/dev/null || true
+          sudo swapoff -a || true
+          df -h /
+
+      - name: 选择构建目录（优先 /mnt 大盘）
+        run: |
+          mnt_avail=0
+          [ -d /mnt ] && mnt_avail=$(df -Pk /mnt | awk 'NR==2{print $4}')
+          if [ "${mnt_avail:-0}" -gt 40000000 ]; then
+            sudo mkdir -p /mnt/build
+            sudo chown -R "$(id -u):$(id -g)" /mnt/build
+            rsync -a "$GITHUB_WORKSPACE"/ /mnt/build/
+            echo "SRC=/mnt/build" >> "$GITHUB_ENV"
+            echo "构建目录：/mnt/build（$(df -h /mnt | awk 'NR==2{print $4}') 可用）"
+          else
+            echo "SRC=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+            echo "构建目录：workspace（$(df -h "$GITHUB_WORKSPACE" | awk 'NR==2{print $4}') 可用）"
+          fi
+
+      - name: 磁盘闸门
+        run: |
+          avail=$(df -Pk "$SRC" | awk 'NR==2{print $4}')
+          gb=$((avail / 1024 / 1024))
+          echo "可用空间：${gb} GB"
+          if [ "$avail" -lt 28000000 ]; then
+            echo "::error::可用空间只有 ${gb} GB，OpenWrt 全量编译需要 20-25 GB，提前终止"
+            exit 1
+          fi
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      # ---------------------------------------------------------------------
+      # 缓存：只缓存 dl/ 和 .ccache。
+      # 不缓存 build_dir / staging_dir / bin —— 压缩后 8-12 GB，会挤爆
+      # actions/cache 单仓库 10 GB 上限，而且解压比重编还慢。
+      # ---------------------------------------------------------------------
+      - name: 恢复 dl 缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SRC }}/dl
+          key: dl-${{ env.COMMIT }}-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          restore-keys: |
+            dl-${{ env.COMMIT }}-
+            dl-
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SRC }}/.ccache
+            ~/.ccache
+          key: cc-${{ env.COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            cc-${{ env.COMMIT }}-
+            cc-
+
+      - name: 初始化 ccache
+        run: |
+          mkdir -p "$SRC/.ccache"
+          ccache -M 2G
+          ccache --set-config=compression=true || true
+          ccache -s
+
+      # ---------------------------------------------------------------------
+      # feeds：两个私有 feed（pon_drivers / pon_userspace）是 PON 功能的前提，
+      # 拉不到就编不出 kmod-airoha-xpon / airoha-ponctl / luci-app-pon
+      # ---------------------------------------------------------------------
+      - name: 更新 feeds
+        working-directory: ${{ env.SRC }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 检查 overlay 是否就位
+        working-directory: ${{ env.SRC }}
+        run: |
+          for f in files/etc/uci-defaults/99-hg5585f-setup \
+                   files/etc/init.d/pon-watchdog \
+                   files/usr/sbin/pon-watchdog \
+                   files/etc/config/pon \
+                   files/etc/config/dhcp \
+                   configs/hg5585f-profile.config \
+                   configs/hg5585f-build.config; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少 $f"
+              exit 1
+            fi
+          done
+          echo "overlay 文件齐全"
+
+      - name: 生成 .config（含断言）
+        working-directory: ${{ env.SRC }}
+        run: |
+          if [ "${{ inputs.build_recovery }}" = "false" ]; then
+            export ALLOW_NO_INITRAMFS=1
+          fi
+          sh scripts/hg5585f/gen-config.sh
+
+      - name: 下载源码包
+        working-directory: ${{ env.SRC }}
+        run: make download -j8
+
+      - name: 编译
+        working-directory: ${{ env.SRC }}
+        shell: bash
+        run: |
+          set -o pipefail
+          J=$(( $(nproc) + 1 ))
+          echo "并行度：-j$J"
+          start=$(date +%s)
+          if make -j"$J" 2>&1 | tee build.log; then
+            echo "编译成功，耗时 $(( ($(date +%s) - start) / 60 )) 分钟"
+          else
+            echo "::error::首次编译失败，用 -j1 V=s 重跑以拿到可读报错（增量，只重编失败的那部分）"
+            make -j1 V=s 2>&1 | tee -a build.log || true
+            exit 1
+          fi
+          ccache -s || true
+
+      - name: 收集并校验产物
+        working-directory: ${{ env.SRC }}
+        run: sh scripts/hg5585f/collect-artifacts.sh "$SRC" "$RUNNER_TEMP/out"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: hg5585f-${{ env.COMMIT }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/out/*
+          retention-days: 30
+          if-no-files-found: error
+
+      # 失败也要留下可诊断的东西，否则只能瞎猜
+      - name: 上传诊断信息（失败时）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ env.COMMIT }}-${{ github.run_number }}
+          path: |
+            ${{ env.SRC }}/.config
+            ${{ env.SRC }}/build.log
+            ${{ env.SRC }}/bin/targets/airoha/an7581/profiles.json
+            ${{ env.SRC }}/bin/targets/airoha/an7581/config.buildinfo
+            ${{ env.SRC }}/logs/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.make_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="build-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "发布标签：$TAG"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "HG5585F $TAG" \
+              --notes "PonWrt HG5585F (CT + CU) 自编译产物。源码 commit：${{ env.COMMIT }}。刷机前请先读 README-HG5585F.md 的「刷机前置」章节。" \
+              --prerelease
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP"/out/* --clobber

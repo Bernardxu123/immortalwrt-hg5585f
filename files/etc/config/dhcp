@@ -1,0 +1,56 @@
+# HG5585F 桥接模式 DHCP 配置
+#
+# ⚠️ 核心安全约束
+# br-lan 的成员包含 pon0.995（运营商上网业务 VLAN 995），也就是说
+# 本机的 DHCP 广播 / IPv6 RA 会直接打进联通接入网。
+# OLT 侧普遍开 DHCP snooping + 端口绑定，ONT 口出现非授权 DHCP 服务器时
+# 轻则该 PON 口被 err-disable（整户断网，需要运营商侧恢复），
+# 重则 IP 冲突告警影响同一 PON 口的邻居。
+# 所以 lan 上必须：dhcpv4=disabled、dhcpv6=disabled、ra=disabled、ndp=disabled、ignore=1。
+#
+# 为什么保留 config odhcpd 段
+# /etc/uci-defaults/15_odhcpd（来自 odhcpd 包）在检测到 dhcp.odhcpd 已存在时会
+# 直接 exit 0，不再把 dhcp.lan.dhcpv4 强设为 server。少了这一段，
+# 它会在首次启动时把 DHCP server 重新打开。
+
+config dnsmasq
+	option domainneeded '1'
+	option boguspriv '1'
+	option filterwin2k '0'
+	option localise_queries '1'
+	option rebind_protection '1'
+	option rebind_localhost '1'
+	option local '/lan/'
+	option domain 'lan'
+	option expandhosts '1'
+	option nonegcache '1'
+	option authoritative '1'
+	option readethers '1'
+	option leasefile '/tmp/dhcp.leases'
+	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+	option nonwildcard '1'
+	option localservice '1'
+	option ednspacket_max '1232'
+	option filter_aaaa '0'
+	option filter_a '0'
+
+# 桥接模式：lan 不提供任何地址服务（管理地址是静态 192.168.1.1）
+config dhcp 'lan'
+	option interface 'lan'
+	option ignore '1'
+	option dhcpv4 'disabled'
+	option dhcpv6 'disabled'
+	option ra 'disabled'
+	option ndp 'disabled'
+
+config dhcp 'wan'
+	option interface 'wan'
+	option ignore '1'
+
+config odhcpd 'odhcpd'
+	option maindhcp '0'
+	option leasefile '/tmp/odhcpd.leases'
+	option leasetrigger '/usr/sbin/odhcpd-update'
+	option loglevel '4'
+	option piodir '/tmp/odhcpd-piodir'
+	option hostsdir '/tmp/hosts'

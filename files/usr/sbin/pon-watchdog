@@ -1,0 +1,180 @@
+#!/bin/sh
+# pon-watchdog —— 10G-EPON 冷启动 MPCP 自循环的兜底（上游 Issue #42）
+#
+# 现象（Issue #42 原样，与 HG5585F 联通非对称 10G-EPON 场景一致）：
+#   ONU 完成一次注册（EPON LLID0 registered: LLID=0x....），随后每 ~1s
+#   打一条 "EPON MPCP timeout: state=4 llid_valid=1"，service_ready 恒为 0，
+#   光层完全健康（pcs_sync=1 / freqdet_locked=1 / uncorrected_codewords=0）。
+#   作者实测冷启动 5/5 中招，且不会自愈。
+#
+# 判据为什么不用 mpcp_state
+#   形态 B 下 mpcp_state 每 1s 会在 registered 窗口里露面几百毫秒，
+#   任何低频采样都会误判为正常（Issue #42 作者第一版看门狗就栽在这）。
+#   这里用 lifecycle + rx_start_count 的组合：
+#     - lifecycle 稳定在 operational 且 service_ready=1 才算健康
+#     - 卡死时 lifecycle 停在 wait-line-sync/error，且 rx_start_count 以 ~1Hz 增长
+#
+# 为什么恢复前要先 ifdown lan
+#   pon0.995 是 br-lan 的成员，持有对 pon0 的引用，直接 modprobe -r 会 EBUSY。
+#
+# 为什么永不自动 reboot
+#   这个 bug 的触发条件就是冷启动，重启只会把状态机扔回同一个坑，
+#   还会让 OLT 侧看到频繁掉线。宁可保持"不 ready 但在线可 SSH 排查"。
+#
+# 手动排障：
+#   logread -e pon-watchdog
+#   cat /tmp/pon-watchdog.log
+#   cat /sys/kernel/debug/airoha-xpon-pon0/line
+#   停用：/etc/init.d/pon-watchdog stop && /etc/init.d/pon-watchdog disable
+
+DBG=/sys/kernel/debug/airoha-xpon-pon0/line
+LOGFILE=/tmp/pon-watchdog.log
+
+POLL=10          # 采样周期（秒）
+GRACE=120        # 开机宽限期：覆盖 pon(S18) → pond(S19) → 网络起来 → OLT 发现窗口
+NEED=4           # 连续异常采样次数（4 × 10s = 40s）才判定卡死
+RX_HOT=20        # 40s 内 rx_start_count 增量阈值，≈1Hz 自循环的指纹
+MAXTRY=3         # 连续恢复失败次数上限
+BACKOFF=600      # 达到上限后的退避时长（秒）
+
+log() {
+	logger -t pon-watchdog "$*"
+	printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOGFILE"
+	if [ "$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)" -gt 400 ]; then
+		tail -n 200 "$LOGFILE" > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"
+	fi
+}
+
+is_true() {
+	case "$1" in
+	1|y|Y|yes|on|true|True|up) return 0 ;;
+	esac
+	return 1
+}
+
+# 从 debugfs 单文件里取一个字段，兼容 "key: value" 与 "key value" 两种排版
+read_field() {
+	[ -r "$DBG" ] || return 1
+	awk -v k="$1" '$1 == k ":" { print $2; exit } $1 == k { print $2; exit }' "$DBG" 2>/dev/null
+}
+
+recover() {
+	log "recover: 开始（pon0 down → rmmod → modprobe → pon reload → pond start → 重建桥）"
+
+	# 拆 br-lan，释放 pon0.995 对 pon0 的引用（否则 rmmod 会 EBUSY）
+	ifdown lan >/dev/null 2>&1
+	ip link set pon0 down 2>/dev/null
+	/etc/init.d/airoha-pond stop >/dev/null 2>&1
+
+	i=0
+	while [ "$i" -lt 3 ]; do
+		modprobe -r airoha_xpon >/dev/null 2>&1 && break
+		i=$((i + 1))
+		sleep 2
+	done
+
+	if modprobe airoha_xpon >/dev/null 2>&1; then
+		log "recover: airoha_xpon 已重新加载"
+	else
+		log "recover: ERROR airoha_xpon 加载失败"
+	fi
+	sleep 2
+
+	/etc/init.d/pon reload >/dev/null 2>&1
+	/etc/init.d/airoha-pond start >/dev/null 2>&1
+	ip link set pon0 up 2>/dev/null
+	ifup lan >/dev/null 2>&1
+
+	log "recover: 结束，进入观察期"
+}
+
+cnt=0
+delta=0
+tries=0
+prev_rx=
+last_state=
+debugfs_tried=0
+
+log "启动：poll=${POLL}s grace=${GRACE}s need=${NEED} rx_hot=${RX_HOT}"
+
+while :; do
+	sleep "$POLL"
+
+	if [ "$(cut -d. -f1 /proc/uptime)" -lt "$GRACE" ]; then
+		continue
+	fi
+
+	if [ ! -r "$DBG" ]; then
+		if [ "$debugfs_tried" != 1 ]; then
+			mount -t debugfs none /sys/kernel/debug 2>/dev/null
+			debugfs_tried=1
+		fi
+		if [ ! -r "$DBG" ]; then
+			log "WARN: $DBG 不可读（pon0 未创建或 debugfs 未挂载），30s 后重试"
+			sleep 30
+			continue
+		fi
+	fi
+
+	life=$(read_field lifecycle)
+	opt=$(read_field optical_signal)
+	sr=$(read_field service_ready)
+	rx=$(read_field rx_start_count)
+
+	state="$life/$opt/$sr"
+	if [ "$state" != "$last_state" ]; then
+		log "state: lifecycle=$life optical_signal=$opt service_ready=$sr rx_start_count=$rx"
+		last_state="$state"
+	fi
+
+	# 健康：清零所有计数
+	if [ "$life" = "operational" ] && is_true "$sr"; then
+		[ "$cnt" != 0 ] && log "已恢复健康"
+		cnt=0
+		delta=0
+		tries=0
+		prev_rx=$rx
+		continue
+	fi
+
+	# 光层不通：看门狗不介入（打了也没用），只由上面的 state 变化日志留痕
+	if ! is_true "$opt"; then
+		cnt=0
+		delta=0
+		prev_rx=$rx
+		continue
+	fi
+
+	if [ -n "$prev_rx" ] && [ -n "$rx" ]; then
+		d=$((rx - prev_rx))
+		[ "$d" -gt 0 ] && delta=$((delta + d))
+	fi
+	prev_rx=$rx
+	cnt=$((cnt + 1))
+
+	hot=0
+	case "$life" in
+	wait-line-sync|error)
+		hot=1
+		;;
+	protocol-activating)
+		# 正常注册会在这里停留 10-30s，只有 rx_start_count 狂涨才算异常
+		[ "$delta" -ge "$RX_HOT" ] && hot=1
+		;;
+	esac
+
+	[ "$cnt" -ge "$NEED" ] && [ "$hot" = 1 ] || continue
+
+	log "判定卡死：lifecycle=$life rx_delta=${delta}/${NEED}x${POLL}s（阈值 ${RX_HOT}）"
+	recover
+	cnt=0
+	delta=0
+	prev_rx=
+	tries=$((tries + 1))
+
+	if [ "$tries" -ge "$MAXTRY" ]; then
+		log "连续 ${tries} 次恢复后仍不健康，退避 ${BACKOFF}s（不重启设备）"
+		sleep "$BACKOFF"
+		tries=0
+	fi
+done
