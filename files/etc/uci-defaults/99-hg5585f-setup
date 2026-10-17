@@ -137,13 +137,31 @@ set dhcp.wan.ignore='1'
 EOF
 
 # ---------------------------------------------------------------------------
-# 6. 路由模式的 flow offload —— 这次真正有意义
-#    inet flowtable + AN7581 PPE 可以卸载 PPPoE（驱动支持 FLOW_ACTION_PPPOE_PUSH）
-#    注意：后续上 Passwall/OpenClash（tproxy）时可能需要关掉，见 README。
+# 6. flow offload —— 按有没有分流内核区分
+#
+#    没有代理：inet flowtable + AN7581 PPE 可以卸载 PPPoE
+#              （驱动支持 FLOW_ACTION_PPPOE_PUSH），全开。
+#
+#    有代理（Passwall/OpenClash 走 tproxy）：
+#              硬件卸载（flags offload）会把被代理的流直接甩给 PPE，
+#              绕开 tproxy，表现为"部分站点直连、规则不生效"。
+#              所以只保留软件 flowtable（对非代理流量仍有收益），关掉 hw。
+#              若实测代理流量仍有异常，把 flow_offloading 也设 0：
+#                uci set firewall.@defaults[0].flow_offloading='0'
+#                uci commit firewall && /etc/init.d/firewall restart
 # ---------------------------------------------------------------------------
+if [ -x /etc/init.d/passwall ] || [ -x /usr/sbin/passwall ] || \
+   [ -x /etc/init.d/openclash ] || [ -d /etc/openclash ]; then
+	FLOW_HW=0
+	log "检测到分流内核：flow_offloading=1 / flow_offloading_hw=0（避免硬件卸载绕过 tproxy）"
+else
+	FLOW_HW=1
+	log "未装分流内核：flow_offloading=1 / flow_offloading_hw=1"
+fi
+
 uci -q batch <<EOF
 set firewall.@defaults[0].flow_offloading='1'
-set firewall.@defaults[0].flow_offloading_hw='1'
+set firewall.@defaults[0].flow_offloading_hw='${FLOW_HW}'
 EOF
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,14 @@ name: build-hg5585f
 on:
   workflow_dispatch:
     inputs:
+      proxy:
+        description: '分流内核（none=不含代理；passwall 适合 512MB；openclash 需要 Ruby）'
+        type: choice
+        options:
+          - passwall
+          - openclash
+          - none
+        default: passwall
       build_recovery:
         description: '同时产出 recovery.itb（initramfs 救援镜像，约多 10-16 分钟）'
         type: boolean
@@ -179,6 +187,8 @@ jobs:
           if [ "${{ inputs.build_recovery }}" = "false" ]; then
             export ALLOW_NO_INITRAMFS=1
           fi
+          export PROXY="${{ inputs.proxy }}"
+          echo "分流层：${PROXY:-passwall}（空值 = tag 触发，走 passwall）"
           sh scripts/hg5585f/gen-config.sh
 
       - name: 下载源码包

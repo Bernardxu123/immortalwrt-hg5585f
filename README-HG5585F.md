@@ -287,14 +287,41 @@ cat /tmp/pon-watchdog.log
 4. `mpcp_timeouts` 在正常注册与故障自循环下的实际斜率
 5. `flow_offloading_hw` 在 AN7581 路由模式下是否真的带上 `flags offload`（`nft list flowtable inet fw4` / PPE debugfs）
 
-**后续上 Passwall/OpenClash 时注意**：tproxy 与 flow offload 可能冲突；代理流量走
-tproxy 时，可能需要关掉 `flow_offloading`（或至少验证被代理的流没有被硬件快路径
-绕过）。这是下一版要 A/B 的点，不在本版默认里。
+**flow offload 与 tproxy 的关系**：硬件卸载（`flags offload`）会把被代理的流直接甩给
+PPE，绕开 tproxy，表现为"部分站点直连、规则不生效"。所以 `99-hg5585f-setup` 在检测到
+分流内核时**自动只保留软件 flowtable**（`flow_offloading=1` / `flow_offloading_hw=0`）；
+没有分流内核时两者都开。若实测代理流量仍有异常：
 
-### 分流方案备查（参考 qwpianzhang/Actions-OpenWrt-HG5585F）
+```sh
+uci set firewall.@defaults[0].flow_offloading='0'
+uci commit firewall && /etc/init.d/firewall restart
+```
 
-参考仓确认：**Passwall 与 OpenClash 都在 ImmortalWrt feeds 里**，不需要额外 feed；
-只有 **nikki（mihomo）** 需要加 feed。512 MiB + 1G 口更建议：
+### 分流内核：编译时三选一
+
+由 workflow 的 `proxy` 输入决定，默认 **passwall**（512 MiB RAM 首选）：
+
+```sh
+gh workflow run build-hg5585f --repo Bernardxu123/ponwrt-hg5585f --ref master \
+  -f proxy=passwall -f build_recovery=true
+```
+
+| proxy | 配置文件 | 取舍 |
+|---|---|---|
+| `passwall`（默认） | `configs/hg5585f-proxy-passwall.config` | Xray/SingBox/Hysteria/Simple-Obfs/Geoview；不拉 Rust，约 +30~40 分钟 |
+| `openclash` | `configs/hg5585f-proxy-openclash.config` | Clash 订阅原生；DEPENDS 里有 `+ruby +ruby-yaml`，Ruby 源码编译约 +15~25 分钟，运行内存也更高 |
+| `none` | 无 | 只做路由/桥接，验证链路用 |
+
+两者互斥，断言会检查。**不开 Shadowsocks-Rust**：会把 Rust 工具链拉进构建
+（`rust/host` 现编，ccache 覆盖不到），而实际节点是 VLESS/Reality/Hy2，用不上。
+
+nikki（mihomo）不在选项里——它需要额外 feed（`nikkinikki-org/OpenWrt-nikki`），
+本仓库没加。想要更轻的 Clash 方案可以自己加 feed 后照 `openclash` 的写法加一个层。
+
+### 方案对比（参考 qwpianzhang/Actions-OpenWrt-HG5585F）
+
+**Passwall 与 OpenClash 都在 ImmortalWrt feeds 里**，不需要额外 feed；
+只有 **nikki（mihomo）** 要加 feed。
 
 | 方案 | 来源 | 取舍 |
 |---|---|---|

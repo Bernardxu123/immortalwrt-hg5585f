@@ -103,13 +103,39 @@ need_y PACKAGE_zram-swap
 need_unset TARGET_airoha_an7583
 need_unset TARGET_airoha_en7523
 
+# ---- 12. 分流层（由 gen-config.sh 通过 PROXY 传入，默认 passwall）----
+case "${PROXY:-passwall}" in
+passwall)
+	need_y PACKAGE_luci-app-passwall
+	need_y PACKAGE_luci-app-passwall_INCLUDE_Xray
+	need_y PACKAGE_luci-app-passwall_INCLUDE_SingBox
+	need_y PACKAGE_luci-app-passwall_INCLUDE_Hysteria
+	# Rust 工具链会让构建时间翻倍，明确不要
+	need_unset PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client
+	need_unset PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server
+	need_unset PACKAGE_luci-app-openclash
+	;;
+openclash)
+	need_y PACKAGE_luci-app-openclash
+	need_unset PACKAGE_luci-app-passwall
+	;;
+none)
+	need_unset PACKAGE_luci-app-passwall
+	need_unset PACKAGE_luci-app-openclash
+	;;
+*)
+	err "PROXY='${PROXY}' 不支持（none|passwall|openclash）"
+	;;
+esac
+
 if [ "$fail" -ne 0 ]; then
 	echo "" >&2
 	echo "配置断言失败。常见原因与修法：" >&2
 	echo "  * device 数量不对 -> configs/hg5585f-profile.config 被上游覆盖，检查是否出现新的 device profile" >&2
 	echo "  * 关键包丢失    -> 上游改了包名或 DEFAULT_PACKAGES，需要同步 configs/hg5585f-build.config" >&2
 	echo "  * br_netfilter  -> 有包 select 了 kmod-br-netfilter，检查上游 kmod 依赖变化" >&2
+	echo "  * 分流包缺失    -> feeds 没装全，或上游改了 luci-app-passwall 的 INCLUDE_ 符号名" >&2
 	exit 1
 fi
 
-echo "配置断言通过：2 个 device profile（cu/ct）、关键包齐备、未装 br_netfilter"
+echo "配置断言通过：2 个 device profile（cu/ct）、关键包齐备、未装 br_netfilter、分流=${PROXY:-passwall}"
