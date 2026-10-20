@@ -137,32 +137,78 @@ set dhcp.wan.ignore='1'
 EOF
 
 # ---------------------------------------------------------------------------
-# 6. flow offload —— 按有没有分流内核区分
+# 6. flow offload —— 恒定全开（含硬件 PPE 卸载）
 #
-#    没有代理：inet flowtable + AN7581 PPE 可以卸载 PPPoE
-#              （驱动支持 FLOW_ACTION_PPPOE_PUSH），全开。
+#    历史假设（2026-10 之前）：装了 Passwall/OpenClash 就不能开 flow_offloading_hw，
+#    理由是"硬件卸载会把被代理的流甩给 PPE、绕开 tproxy"。
 #
-#    有代理（Passwall/OpenClash 走 tproxy）：
-#              硬件卸载（flags offload）会把被代理的流直接甩给 PPE，
-#              绕开 tproxy，表现为"部分站点直连、规则不生效"。
-#              所以只保留软件 flowtable（对非代理流量仍有收益），关掉 hw。
-#              若实测代理流量仍有异常，把 flow_offloading 也设 0：
-#                uci set firewall.@defaults[0].flow_offloading='0'
-#                uci commit firewall && /etc/init.d/firewall restart
+#    **该假设已被实测推翻（2026-10-20）**：
+#      tproxy 在 prerouting 就把包截下并本地投递，被代理的 flow 永远进不了
+#      forward 方向的 flowtable，PPE 根本看不到它。硬件卸载只作用于
+#      未被代理的直连/转发流量。
+#
+#    实测证据（8 路并发，PC 有线千兆，2026-10-20）：
+#      · 直连下行 ~670 Mbps 时四核合计 busy 仅 ~4%  → PPE 确实在卸载
+#      · 开 hw 前后代理出口 IP 不变（155.254.108.53），YouTube 204 正常
+#      · npu_attached: 1，/sys/kernel/debug/ppe/entries 有 BND/UNB 表项
+#
+#    结论：无论有没有分流内核，都设 flow_offloading=1 + flow_offloading_hw=1。
+#    若日后出现"部分站点直连/规则不生效"，先查 tproxy 规则是否被 prerouting
+#    之外的路径绕过，而不是先怀疑 hw offload。
 # ---------------------------------------------------------------------------
-if [ -x /etc/init.d/passwall ] || [ -x /usr/sbin/passwall ] || \
-   [ -x /etc/init.d/openclash ] || [ -d /etc/openclash ]; then
-	FLOW_HW=0
-	log "检测到分流内核：flow_offloading=1 / flow_offloading_hw=0（避免硬件卸载绕过 tproxy）"
-else
-	FLOW_HW=1
-	log "未装分流内核：flow_offloading=1 / flow_offloading_hw=1"
-fi
-
 uci -q batch <<EOF
 set firewall.@defaults[0].flow_offloading='1'
-set firewall.@defaults[0].flow_offloading_hw='${FLOW_HW}'
+set firewall.@defaults[0].flow_offloading_hw='1'
 EOF
+log "flow_offloading=1 / flow_offloading_hw=1（PPE 卸载；tproxy 在 prerouting，不受影响）"
+
+# ---------------------------------------------------------------------------
+# 6b. packet_steering —— 必须设 2（RPS-only）
+#
+#    OpenWrt 的 /usr/libexec/network/packet-steering.uc 按 **netdev 名** 匹配
+#    NAPI 线程；airoha 的以太网 NAPI 线程叫 napi/qdma_eth-0，netdev 却叫 pon0，
+#    名字对不上 → 脚本判定"无 NAPI 可绑"，把 32 条 RX 队列的 RPS 全塌到 CPU0。
+#    设成 2（纯 RPS，不做每核队列）可绕开该匹配逻辑，rps_cpus 恢复为 f（四核）。
+#    实测：NET_RX 软中断从 CPU0 分散到 CPU1/2/3，IPI1 计数在三个从核上显著增长。
+# ---------------------------------------------------------------------------
+uci -q set network.globals.packet_steering='2'
+
+# ---------------------------------------------------------------------------
+# 6c. 启用随包附带的两个绑核服务
+#
+#   irq-affinity       ：把 airoha_eth 的大中断（irq23/27）从 CPU0 挪到 CPU1/CPU2。
+#                        mt7915e 的 irq19/53 内核禁止用户态改，保持 CPU0。
+#   wifi-napi-affinity ：把 mt76 的 6 个 napi/phy0-N 线程钉到 CPU3
+#                        （单芯片双频，phy0/phy1 共用同一组 NAPI 线程）。
+#
+#   两者都只是**负载分布**优化，实测对峰值吞吐无影响（678 vs 673 Mbps）。
+#   代码与说明见 files/etc/init.d/ 下同名脚本。
+# ---------------------------------------------------------------------------
+for svc in irq-affinity wifi-napi-affinity; do
+	if [ -x "/etc/init.d/$svc" ]; then
+		"/etc/init.d/$svc" enable >/dev/null 2>&1
+		"/etc/init.d/$svc" start  >/dev/null 2>&1 &
+		log "已启用 $svc"
+	fi
+done
+
+# ---------------------------------------------------------------------------
+# 6d. RPS 队列深度
+#
+#    packet_steering=2 把 32 条 RX 队列的 rps_cpus 设为 f（四核均可收），
+#    RPS 靠 IPI 把包投到目标核；默认 backlog 1000 在 700Mbps 多流下偏浅，
+#    目标核来不及消费就整包丢弃（实测 softnet cpu0 dropped 累计 4356）。
+#    注意：/etc/sysctl.d/ 下的文件若由镜像自带，这里的追加是幂等的。
+# ---------------------------------------------------------------------------
+if [ -f /etc/sysctl.d/99-network-tuning.conf ] &&
+   ! grep -q 'netdev_max_backlog' /etc/sysctl.d/99-network-tuning.conf; then
+	cat >> /etc/sysctl.d/99-network-tuning.conf <<'EOF'
+
+# --- RPS 排队深度 ---
+net.core.netdev_max_backlog=16384
+EOF
+fi
+sysctl -w net.core.netdev_max_backlog=16384 >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------
 # 7. WiFi 默认关闭（小米 BE6500 Pro 继续做 AP）

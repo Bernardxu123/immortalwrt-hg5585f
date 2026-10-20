@@ -1,0 +1,37 @@
+#!/bin/sh
+# 温度聚合（LuCI 概览页用 / 命令行直接跑）
+#
+# 输出形如：CPU: 54.2°C, PON: 42.4°C, WiFi: 48.0°C 51.0°C
+#
+# 借鉴自 QWRT 的 /sbin/tempinfo。三项来源：
+#   CPU  → /sys/class/thermal/thermal_zone0/temp        （原始值单位 0.001°C）
+#   WiFi → /sys/class/ieee80211/phy*/hwmon*/temp1_input （每 phy 一项，phy0=2.4G phy1=5G）
+#   PON  → ponctl status --json 的 frontend.temperature_celsius
+#
+# ⚠️ PON 温度是软依赖：ponctl 的 JSON 字段路径在 ponwrt 上尚未逐一核实，
+#    取不到就静默省略，不影响 CPU/WiFi 两项。
+
+cpu=""; pon=""; wifi=""
+
+if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+	cpu=$(awk '{printf "%.1f°C", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
+fi
+
+for f in /sys/class/ieee80211/phy*/hwmon*/temp1_input; do
+	[ -r "$f" ] || continue
+	wifi="$wifi$(awk '{printf "%.1f°C ", $1/1000}' "$f")"
+done
+
+if [ -x /usr/sbin/ponctl ]; then
+	t=$(/usr/sbin/ponctl --device pon0 status --json 2>/dev/null \
+	    | jsonfilter -e '@.frontend.temperature_celsius' 2>/dev/null)
+	[ -n "$t" ] && pon=$(awk -v v="$t" 'BEGIN{printf "%.1f°C", v}')
+fi
+
+out=""
+[ -n "$cpu" ]  && out="CPU: $cpu"
+[ -n "$pon" ]  && out="${out:+$out, }PON: $pon"
+[ -n "$wifi" ] && out="${out:+$out, }WiFi: ${wifi% }"
+[ -n "$out" ]  || out="No temperature info"
+
+printf '%s' "$out"

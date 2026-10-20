@@ -1,0 +1,43 @@
+#!/bin/sh /etc/rc.common
+# WiFi NAPI 绑核
+#
+# 为什么需要：packet_steering=2（RPS-only）生效后，内核会重新分配 NAPI 线程的
+# 亲和性，WiFi 的 NAPI 线程会被挪到 CPU0，跟以太网硬中断抢同一个核。
+#
+# 为什么钉 CPU3：mt7915e 的收包成本主要在软栈（mt76 没有闭源驱动的硬件 NAT，
+# 即 QWRT 的 mt_whnat 在本栈上不存在），钉一个独立核可避免它与
+# airoha_eth 的 NAPI 相互踩踏。
+#
+# ⚠️ 重要事实（2026-10-20 实测澄清）：
+#   本机 mt7915e 是**单芯片双频**（phy0 = 2.4G MAC 00:0c:43:26:60:00，
+#   phy1 = 5G MAC 82:0c:43:26:60:00），NAPI 实例按 mt76 设备命名，
+#   **统一叫 napi/phy0-N，phy0 和 phy1 共用这 6 个线程**。
+#   所以不存在"单独的 5G NAPI 线程"，也不需要为 5G 另加匹配规则。
+#   （曾被误判为"5G NAPI 没绑上"，实为同一个对象。）
+#
+# 已知副作用：所有 WiFi 收包集中在一个核，满载时该核（CPU3）成为瓶颈。
+#   实测 5G 下行 900 Mbps 时 CPU3 sys 达 79%。若想分摊，把 for 循环里的
+#   -c 3 改成按 pid 轮转 1/2/3 即可，但需重测收益（RPS 已在做分发，
+#   过度绑核可能反而增加跨核 IPI）。
+
+START=26
+USE_PROCD=1
+
+pin_wifi_napi() {
+	# 5 秒窗口内反复钉：mt76 的 NAPI 线程会随 wifi reload 重建，PID 变化、
+	# 亲和性复位，一次性设置会被冲掉。
+	for i in 1 2 3 4 5; do
+		for p in $(ps w | awk '/napi\/phy[0-9]+-/ {print $1}'); do
+			taskset -p -c 3 "$p" >/dev/null 2>&1
+		done
+		sleep 1
+	done
+}
+
+start_service() { pin_wifi_napi & }
+reload_service() { pin_wifi_napi & }
+
+service_triggers() {
+	procd_add_reload_trigger "network"
+	procd_add_reload_trigger "firewall"
+}
