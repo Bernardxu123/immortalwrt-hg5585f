@@ -1,37 +1,117 @@
 #!/bin/sh
-# 温度聚合（LuCI 概览页用 / 命令行直接跑）
+# 温度 / 光模块信息聚合
 #
-# 输出形如：CPU: 54.2°C, PON: 42.4°C, WiFi: 48.0°C 51.0°C
+# 用法：
+#   tempinfo            单行人类可读（LuCI 概览页 / 命令行）
+#   tempinfo -j         JSON（程序消费）
+#   tempinfo -s         极简，只有温度（兼容旧调用）
 #
-# 借鉴自 QWRT 的 /sbin/tempinfo。三项来源：
-#   CPU  → /sys/class/thermal/thermal_zone0/temp        （原始值单位 0.001°C）
-#   WiFi → /sys/class/ieee80211/phy*/hwmon*/temp1_input （每 phy 一项，phy0=2.4G phy1=5G）
-#   PON  → ponctl status --json 的 frontend.temperature_celsius
+# 数据来源：
+#   CPU  /sys/class/thermal/thermal_zone0/temp             单位 0.001°C
+#   WiFi /sys/class/ieee80211/phy*/hwmon*/temp1_input      每个 phy 一项
+#        ⚠️ 实测本机路径就是 phy0/hwmon0、phy1/hwmon1；
+#           phy*/device/hwmon/hwmon*/ 这个形式在本机**不存在**，别用。
+#   PON  ponctl --device <pon> status --json 的 frontend 段
+#        temperature_celsius / rx_power_dbm / tx_power_dbm /
+#        tx_bias_ma / voltage_volts
 #
-# ⚠️ PON 温度是软依赖：ponctl 的 JSON 字段路径在 ponwrt 上尚未逐一核实，
-#    取不到就静默省略，不影响 CPU/WiFi 两项。
+# PON 设备名自动探测（不硬编码 pon0）：从 /sys/class/net/pon* 取。
 
-cpu=""; pon=""; wifi=""
+MODE="long"
+case "$1" in
+	-j|--json)  MODE="json" ;;
+	-s|--short) MODE="short" ;;
+esac
 
+# ---------- CPU ----------
+cpu=""
 if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
-	cpu=$(awk '{printf "%.1f°C", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
+	cpu=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
 fi
 
+# ---------- WiFi ----------
+wifi=""
 for f in /sys/class/ieee80211/phy*/hwmon*/temp1_input; do
 	[ -r "$f" ] || continue
-	wifi="$wifi$(awk '{printf "%.1f°C ", $1/1000}' "$f")"
+	wifi="$wifi $(awk '{printf "%.1f", $1/1000}' "$f")"
+done
+wifi=${wifi# }
+
+# ---------- PON ----------
+pon_dev=""
+for d in /sys/class/net/pon*; do
+	[ -e "$d" ] || continue
+	pon_dev=$(basename "$d")
+	break
 done
 
-if [ -x /usr/sbin/ponctl ]; then
-	t=$(/usr/sbin/ponctl --device pon0 status --json 2>/dev/null \
-	    | jsonfilter -e '@.frontend.temperature_celsius' 2>/dev/null)
-	[ -n "$t" ] && pon=$(awk -v v="$t" 'BEGIN{printf "%.1f°C", v}')
+pon_json=""
+if [ -n "$pon_dev" ] && [ -x /usr/sbin/ponctl ]; then
+	pon_json=$(/usr/sbin/ponctl --device "$pon_dev" status --json 2>/dev/null)
 fi
 
-out=""
-[ -n "$cpu" ]  && out="CPU: $cpu"
-[ -n "$pon" ]  && out="${out:+$out, }PON: $pon"
-[ -n "$wifi" ] && out="${out:+$out, }WiFi: ${wifi% }"
-[ -n "$out" ]  || out="No temperature info"
+jget() {
+	[ -n "$pon_json" ] || return
+	printf '%s' "$pon_json" | jsonfilter -e "@.frontend.$1" 2>/dev/null
+}
 
+pon_t=$(jget temperature_celsius)
+pon_rx=$(jget rx_power_dbm)
+pon_tx=$(jget tx_power_dbm)
+pon_bias=$(jget tx_bias_ma)
+pon_v=$(jget voltage_volts)
+
+# ---------- 输出 ----------
+if [ "$MODE" = "json" ]; then
+	printf '{"cpu_c":%s' "${cpu:-null}"
+	if [ -n "$wifi" ]; then
+		printf ',"wifi_c":[%s]' "$(echo "$wifi" | tr ' ' ',')"
+	else
+		printf ',"wifi_c":null'
+	fi
+	if [ -n "$pon_t" ]; then
+		printf ',"pon":{"device":"%s","temp_c":%s,"rx_power_dbm":%s,"tx_power_dbm":%s,"tx_bias_ma":%s,"voltage_v":%s}' \
+			"$pon_dev" "${pon_t:-null}" "${pon_rx:-null}" "${pon_tx:-null}" \
+			"${pon_bias:-null}" "${pon_v:-null}"
+	else
+		printf ',"pon":null'
+	fi
+	printf '}\n'
+	exit 0
+fi
+
+if [ "$MODE" = "short" ]; then
+	out=""
+	[ -n "$cpu" ]   && out="CPU: ${cpu}°C"
+	[ -n "$pon_t" ] && out="${out:+$out, }PON: $(awk -v v="$pon_t" 'BEGIN{printf "%.1f", v}')°C"
+	[ -n "$wifi" ] && {
+		w=""
+		for t in $wifi; do w="$w ${t}°C"; done
+		out="${out:+$out, }WiFi:${w}"
+	}
+	[ -n "$out" ] || out="No temperature info"
+	printf '%s' "$out"
+	exit 0
+fi
+
+# 长格式：温度 + 光模块四项
+out=""
+[ -n "$cpu" ] && out="CPU: ${cpu}°C"
+
+if [ -n "$pon_t" ]; then
+	p=$(awk -v v="$pon_t" 'BEGIN{printf "%.1f°C", v}')
+	[ -n "$pon_rx" ]   && p="$p 收$(awk -v v="$pon_rx" 'BEGIN{printf "%+.2f", v}')dBm"
+	[ -n "$pon_tx" ]   && p="$p 发$(awk -v v="$pon_tx" 'BEGIN{printf "%.2f", v}')dBm"
+	[ -n "$pon_bias" ] && p="$p 偏$(awk -v v="$pon_bias" 'BEGIN{printf "%.1f", v}')mA"
+	[ -n "$pon_v" ]    && p="$p $(awk -v v="$pon_v" 'BEGIN{printf "%.2f", v}')V"
+	out="${out:+$out | }PON: $p"
+fi
+
+if [ -n "$wifi" ]; then
+	w=""
+	for t in $wifi; do w="$w ${t}°C"; done
+	out="${out:+$out | }WiFi:${w}"
+fi
+
+[ -n "$out" ] || out="No temperature info"
 printf '%s' "$out"
