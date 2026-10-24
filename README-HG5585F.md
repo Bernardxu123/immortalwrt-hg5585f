@@ -25,7 +25,8 @@ Bernardxu123/ponwrt-hg5585f
 ```
 configs/hg5585f-profile.config        12 个 device → 2 个
 configs/hg5585f-build.config          ccache / 能力锚点 / 去掉 UPnP / zram / PON 栈
-files/                                首启注入 + 看门狗 + 静态 config + banner
+files/                                首启注入 + 看门狗 + 绑核/温度服务 + sysctl 调优 + 静态 config + banner
+                                      （QWRT 逆向借鉴清单见《QWRT-分析/优化借鉴与落地.md》）
 scripts/hg5585f/                      配置生成 / 断言 / 产物校验 / 本地干跑
 .github/workflows/build.yml           只编 an7581 + HG5585F 两个 profile
 README-HG5585F.md                     本文件

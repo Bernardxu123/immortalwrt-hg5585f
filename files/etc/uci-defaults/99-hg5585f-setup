@@ -85,6 +85,12 @@ EOF
 #      uci set network.wan.username='...'
 #      uci set network.wan.password='...'
 #      uci commit network && /etc/init.d/network restart
+#
+#    MTU=1500 而非 1492（2026-10-22 审计 §E.4/Q5）：netifd 把 wan.mtu 同时
+#    下发给 pon0.995 设备和 pppd，1492 被双重扣减 → pppoe-wan 实际 1484 /
+#    MSS 1444。设 1500 → pppd 扣 8 字节 PPPoE 头 → pppoe-wan=1492 /
+#    MSS=1452（标准值）；fw4 的 MSS clamp 自动跟随。PMTU 黑洞由
+#    tcp_mtu_probing=1 兜底（files/etc/sysctl.d/99-network-tuning.conf）。
 # ---------------------------------------------------------------------------
 uci -q batch <<EOF
 set network.wan='interface'
@@ -93,8 +99,8 @@ set network.wan.proto='pppoe'
 set network.wan.ipv6='1'
 set network.wan.auto='1'
 set network.wan.peerdns='1'
-set network.wan.mtu='1492'
-set network.wan.mru='1492'
+set network.wan.mtu='1500'
+set network.wan.mru='1500'
 set network.wan.keepalive='5 5'
 delete network.wan.username
 delete network.wan.password
