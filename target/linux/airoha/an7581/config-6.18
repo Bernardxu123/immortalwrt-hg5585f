@@ -91,6 +91,16 @@ CONFIG_CRYPTO_LZO=y
 CONFIG_CRYPTO_ZSTD=y
 CONFIG_DCACHE_WORD_ACCESS=y
 CONFIG_DEBUG_INFO=y
+# dae（eBPF）需要 BTF。内核 Kconfig 里 DEBUG_INFO_BTF 有两条硬依赖：
+#   depends on PAHOLE_VERSION >= 116
+#   depends on DEBUG_INFO_DWARF4 || PAHOLE_VERSION >= 121
+# 显式锁 DWARF4 满足第二条的析取，不必赌 CI 上 pahole 的版本号。
+# DWARF4 与 DWARF_TOOLCHAIN_DEFAULT 是 choice 互斥项，必须先关后者再开前者，
+# 否则 kconfig 判冲突、DWARF4 被丢弃（BTF 随之静默消失，不报错）。
+# 这两个符号在 config/Config-kernel.in 里没有 KERNEL_ 前缀版本，
+# 所以只能在核心层面改，configs/*.config 里写不出来。
+# CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set
+CONFIG_DEBUG_INFO_DWARF4=y
 CONFIG_DEBUG_MISC=y
 CONFIG_DEV_COREDUMP=y
 CONFIG_DMADEVICES=y

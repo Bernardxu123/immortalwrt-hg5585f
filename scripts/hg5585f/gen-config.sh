@@ -8,7 +8,7 @@
 #   是因为 parse_expr 用 ^\+ 前缀匹配，嵌套写法极易踩成 "Parse error"。
 #
 # 环境变量：
-#   PROXY=none|passwall|openclash   分流层（默认 passwall）
+#   PROXY=none|passwall|openclash|dae   分流层（默认 passwall）
 #   ALLOW_NO_INITRAMFS=1            跳过 recovery.itb（CI 超时降级用）
 #
 # 用法：
@@ -34,8 +34,9 @@ case "$PROXY" in
 none)      PROXY_CFG= ;;
 passwall)  PROXY_CFG=configs/hg5585f-proxy-passwall.config ;;
 openclash) PROXY_CFG=configs/hg5585f-proxy-openclash.config ;;
+dae)       PROXY_CFG=configs/hg5585f-proxy-dae.config ;;
 *)
-	echo "错误：PROXY='$PROXY' 不支持，只能是 none / passwall / openclash" >&2
+	echo "错误：PROXY='$PROXY' 不支持，只能是 none / passwall / openclash / dae" >&2
 	exit 1
 	;;
 esac

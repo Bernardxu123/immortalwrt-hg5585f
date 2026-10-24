@@ -21,11 +21,12 @@ on:
   workflow_dispatch:
     inputs:
       proxy:
-        description: '分流内核（none=不含代理；passwall 适合小内存；openclash 需要 Ruby）'
+        description: '分流内核（none=不含代理；dae=eBPF 单内核；passwall 适合小内存；openclash 需要 Ruby）'
         type: choice
         options:
           - passwall
           - openclash
+          - dae
           - none
         default: passwall
       build_recovery:

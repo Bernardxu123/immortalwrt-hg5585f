@@ -123,10 +123,46 @@ none)
 	need_unset PACKAGE_luci-app-passwall
 	need_unset PACKAGE_luci-app-openclash
 	;;
+dae)
+	need_y PACKAGE_dae
+	need_y PACKAGE_luci-app-dae
+	need_y PACKAGE_luci-i18n-dae-zh-cn
+	need_y PACKAGE_kmod-sched-core
+	need_y PACKAGE_kmod-sched-bpf
+	need_y PACKAGE_kmod-veth
+	need_y PACKAGE_v2ray-geoip
+	need_y PACKAGE_v2ray-geosite
+	# dae 的 BTF 来源必须锁内核 BTF（ponwrt 主树没有 vmlinux-btf 虚包）
+	need_y DAE_USE_KERNEL_BTF
+	need_unset DAE_USE_VMLINUX_BTF
+	# "只保留一种代理"
+	need_unset PACKAGE_luci-app-passwall
+	need_unset PACKAGE_luci-app-openclash
+	need_unset PACKAGE_xray-core
+	need_unset PACKAGE_sing-box
+	need_unset PACKAGE_hysteria
+	;;
 *)
-	err "PROXY='${PROXY}' 不支持（none|passwall|openclash）"
+	err "PROXY='${PROXY}' 不支持（none|passwall|openclash|dae）"
 	;;
 esac
+
+# ---- 13. dae 的 BTF 依赖链（PROXY=dae 时逐项验证）----
+# 这一组全部是"静默失败"型：符号丢了不报错，只是 BTF 不生成、dae 起不来。
+# 依赖链（任一项不满足，DEBUG_INFO_BTF 都会被 kconfig 悄悄丢弃）：
+#   KERNEL_DEBUG_INFO=y
+#   KERNEL_DEBUG_INFO_REDUCED 必须 not set
+#   KERNEL_DEBUG_INFO_BTF=y
+#   + 核心层 DEBUG_INFO_DWARF4=y（由 an7581/config-6.18 保证，不在 .config 里）
+if [ "${PROXY:-passwall}" = "dae" ]; then
+	need_y KERNEL_DEBUG_INFO
+	need_unset KERNEL_DEBUG_INFO_REDUCED
+	need_y KERNEL_DEBUG_INFO_BTF
+	need_y KERNEL_BPF_EVENTS
+	need_y KERNEL_CGROUP_BPF
+	need_y KERNEL_XDP_SOCKETS
+	need_y KERNEL_KPROBES
+fi
 
 if [ "$fail" -ne 0 ]; then
 	echo "" >&2
