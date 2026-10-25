@@ -140,6 +140,41 @@ jobs:
             uglifyjs unzip wget xmlto xxd xz-utils zip zlib1g-dev zstd
 
       # ---------------------------------------------------------------------
+      # pahole 断言：把 BTF 的「静默失败」变成「响亮失败」
+      #
+      # 内核 CONFIG_DEBUG_INFO_BTF 有两条硬依赖（内核 lib/Kconfig.debug）：
+      #   depends on PAHOLE_VERSION >= 116
+      #   depends on DEBUG_INFO_DWARF4 || PAHOLE_VERSION >= 121
+      # pahole 不满足时，kconfig 会**静默**把 DEBUG_INFO_BTF 丢成 not set：
+      # 编译照样绿灯，产物没有 .BTF，dae 启动时才炸（本项目已踩两次）。
+      # 本步骤只验证宿主机 pahole 可用且 >= 116（BTF 的底线要求）。
+      # ---------------------------------------------------------------------
+      - name: 断言 pahole 可用（BTF 前置）
+        run: |
+          if ! command -v pahole >/dev/null 2>&1; then
+            echo "::error::pahole 不可用。CONFIG_DEBUG_INFO_BTF 会被 kconfig 静默丢弃，"
+            echo "::error::结果是：编译绿灯、镜像无 .BTF、dae 启动即 FATAL。请把 dwarves 加回 apt 列表。"
+            exit 1
+          fi
+          ver_raw=$(pahole --version 2>&1 | head -1)
+          echo "pahole: ${ver_raw}"
+          # 输出形如 "v1.25"。按 major*100+minor 归一化后比较，
+          # 避免 "1.25"→"125" 这种字符串拼接在 2.x 上算错（2.1 会变成 "21" < 116）。
+          major=$(echo "$ver_raw" | sed -n 's/^v\{0,1\}\([0-9]\+\)\..*/\1/p')
+          minor=$(echo "$ver_raw" | sed -n 's/^v\{0,1\}[0-9]\+\.\([0-9]\+\).*/\1/p')
+          if [ -z "$major" ] || [ -z "$minor" ]; then
+            echo "::error::无法解析 pahole 版本号：${ver_raw}"
+            exit 1
+          fi
+          ver=$(( major * 100 + minor ))
+          if [ "$ver" -lt 116 ]; then
+            echo "::error::pahole 版本过低（需要 >= 1.16，当前：${ver_raw}）"
+            echo "::error::BTF 会被 kconfig 静默丢弃，构建虽然绿灯但 dae 无法启动。"
+            exit 1
+          fi
+          echo "OK: pahole ${major}.${minor} >= 1.16，满足 CONFIG_DEBUG_INFO_BTF 底线"
+
+      # ---------------------------------------------------------------------
       # dl 缓存：源码包。key 用周号，同一周内复用同一条目。
       # ---------------------------------------------------------------------
       - name: 恢复 dl 缓存
@@ -438,6 +473,46 @@ jobs:
             exit 1
           fi
           CCACHE_DIR="$SRC/.ccache" ccache -s || true
+
+      # ---------------------------------------------------------------------
+      # .BTF 段断言（仅 PROXY=dae）：确认内核真的带 BTF 出去
+      #
+      # pahole 断言只保证「宿主机有能力」，不保证「kconfig 真的把 BTF 编进去了」。
+      # 内核 DEBUG_INFO_BTF 还有 depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED，
+      # 任何一条不满足都会被静默丢弃。所以这里直接读产物：
+      # 没有 .BTF 段 = dae 启动必 FATAL（BpfLoopFeatureVersion 硬门槛之外的另一道）。
+      #
+      # 必须查未 strip 的 vmlinux（$(LINUX_DIR)/vmlinux）。
+      # $(KERNEL_BUILD_DIR)/vmlinux.elf 是 objcopy -S 之后的，.BTF 可能已被剥掉。
+      # ---------------------------------------------------------------------
+      - name: 断言内核镜像含 .BTF 段（仅 dae）
+        if: inputs.proxy == 'dae'
+        working-directory: ${{ env.SRC }}
+        run: |
+          vmlinux=$(find build_dir -maxdepth 4 -path '*linux-airoha_an7581*/vmlinux' -type f | head -1)
+          if [ -z "$vmlinux" ]; then
+            echo "::error::找不到 vmlinux（build_dir/*/linux-airoha_an7581*/vmlinux）"
+            echo "::error::编译可能提前失败，或内核目录命名变了。"
+            exit 1
+          fi
+          echo "检查：$vmlinux（$(du -h "$vmlinux" | cut -f1)）"
+          if ! command -v readelf >/dev/null 2>&1; then
+            echo "::error::readelf 不可用（binutils 缺失？）"
+            exit 1
+          fi
+          if readelf -S "$vmlinux" | grep -q '\.BTF'; then
+            echo "OK: 内核含 .BTF 段"
+            readelf -S "$vmlinux" | grep -A1 '\.BTF' | head -4
+          else
+            echo "::error::内核镜像缺少 .BTF 段！"
+            echo "::error::dae 启动会 FATAL（无法加载 eBPF）。排查顺序："
+            echo "::error::  1) pahole --version >= 1.16（上一步已断言，应已通过）"
+            echo "::error::  2) CONFIG_KERNEL_DEBUG_INFO=y 且 !CONFIG_KERNEL_DEBUG_INFO_REDUCED"
+            echo "::error::  3) CONFIG_KERNEL_DEBUG_INFO_BTF=y 是否被 kconfig 丢弃"
+            echo "::error::可用下面命令看实际生效值："
+            echo "::error::  grep -E 'DEBUG_INFO' build_dir/*/linux-airoha_an7581*/linux-*/.config"
+            exit 1
+          fi
 
       # actions/cache 的 Post 保存在 job 失败时会跳过；改用显式 save，失败也保住
       - name: 保存 dl 缓存（失败也保存）

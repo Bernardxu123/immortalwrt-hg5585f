@@ -143,30 +143,63 @@ set dhcp.wan.ignore='1'
 EOF
 
 # ---------------------------------------------------------------------------
-# 6. flow offload —— 恒定全开（含硬件 PPE 卸载）
+# 6. flow offload —— 按代理栈分支（软件卸载恒开；硬件 PPE 卸载看栈而定）
 #
-#    历史假设（2026-10 之前）：装了 Passwall/OpenClash 就不能开 flow_offloading_hw，
-#    理由是"硬件卸载会把被代理的流甩给 PPE、绕开 tproxy"。
+#    ===== 先分清两种卸载，这是本节最容易被误读的地方 =====
+#    · 软件 flowtable 卸载（flow_offloading=1，fw4 的 nft flowtable）
+#        → 发生在 **forward 链**。dae/TPROXY 这类代理在更早的钩子就把包
+#          「本地投递」掉了（见下），被代理的流根本走不到 forward，
+#          所以 software offload 对代理流量天然安全。→ 恒开。
+#    · 硬件 PPE 卸载（flow_offloading_hw=1，Airoha 包处理器）
+#        → 已建立的流转交专用硬件转发、**不再回 CPU**。
+#          凡是需要 CPU 上任何钩子的处理（eBPF/TC/Netfilter）都会失去介入机会。
 #
-#    **该假设已被实测推翻（2026-10-20）**：
-#      tproxy 在 prerouting 就把包截下并本地投递，被代理的 flow 永远进不了
-#      forward 方向的 flowtable，PPE 根本看不到它。硬件卸载只作用于
-#      未被代理的直连/转发流量。
-#
-#    实测证据（8 路并发，PC 有线千兆，2026-10-20）：
+#    ===== 为什么「tproxy 不受 PPE 影响」不能直接套到 dae 上 =====
+#    2026-10-20 的实测（8 路并发，PC 有线千兆）证明的是 **TPROXY** 场景：
 #      · 直连下行 ~670 Mbps 时四核合计 busy 仅 ~4%  → PPE 确实在卸载
 #      · 开 hw 前后代理出口 IP 不变（155.254.108.53），YouTube 204 正常
 #      · npu_attached: 1，/sys/kernel/debug/ppe/entries 有 BND/UNB 表项
+#    这条证据链只覆盖 Passwall/OpenClash（TPROXY 路径），**没有覆盖 dae**。
 #
-#    结论：无论有没有分流内核，都设 flow_offloading=1 + flow_offloading_hw=1。
-#    若日后出现"部分站点直连/规则不生效"，先查 tproxy 规则是否被 prerouting
-#    之外的路径绕过，而不是先怀疑 hw offload。
+#    补充事实（dae 源码 control/kern/tproxy.c）：dae 与被代理连接同样走
+#    `bpf_sk_assign()` 做本地投递，钩子在 `tc/lan_ingress` —— 也就是说
+#    dae 的**代理流量**在架构上与 TPROXY 同类，同样进不了 forward/flowtable，
+#    理论上 PPE 也看不到它。
+#
+#    但「理论上看不到」≠「已验证安全」，所以 dae 变体先取保守值 hw=0：
+#      1) dae 在 TC 层还有 wan_ingress/wan_egress 等多个钩子（源码共 12 处
+#         tc/* 程序），其命中范围是否都被 sk_assign 挡在 forward 之前，
+#         未在 an7581 + PPE 上实测过；
+#      2) 本项目历史上（旧 LibWrt 时代）留有"不要开 flow_offloading_hw
+#         （可能与 dae 的 eBPF 冲突）"的告警，从未被证伪；
+#      3) A/B 对照需要干净变量，先关是更可控的起点。
+#
+#    => 装了 dae        → flow_offloading=1 + flow_offloading_hw=0（保守，待实测）
+#    => 没装 dae        → flow_offloading=1 + flow_offloading_hw=1（保留原实测证据链）
+#
+#    回浏览器/实测一键回退到 hw=1（做 A/B 的 B 轮时用）：
+#      uci set firewall.@defaults[0].flow_offloading_hw='1' && \
+#      uci commit firewall && /etc/init.d/firewall reload
+#
+#    判据（实测 hw=1 是否安全）：15 min 内对照①代理出口 IP 是否仍等于节点 IP
+#    ②dae 规则命中是否正常 ③/sys/kernel/debug/ppe/entries 行数
+#    ④/proc/net/softnet_stat 的 dropped ⑤直连吞吐。
+#    若 hw=1 下规则失效 → 本变体固化为 hw=0。
 # ---------------------------------------------------------------------------
+#
+# 运行时探测（不是构建期注入标记）：镜像里 /usr/bin/dae 存在即 dae 变体。
+if [ -x /usr/bin/dae ]; then
+	FLOW_HW=0
+	FLOW_REASON="检测到 dae（${FLOW_HW} = 保守值，PPE 与 TC/eBPF 的交互未经 an7581 实测）"
+else
+	FLOW_HW=1
+	FLOW_REASON="未装 dae（维持 2026-10-20 tproxy 实测结论：PPE 不影响 tproxy）"
+fi
 uci -q batch <<EOF
 set firewall.@defaults[0].flow_offloading='1'
-set firewall.@defaults[0].flow_offloading_hw='1'
+set firewall.@defaults[0].flow_offloading_hw='${FLOW_HW}'
 EOF
-log "flow_offloading=1 / flow_offloading_hw=1（PPE 卸载；tproxy 在 prerouting，不受影响）"
+log "flow_offloading=1 / flow_offloading_hw=${FLOW_HW}（${FLOW_REASON}）"
 
 # ---------------------------------------------------------------------------
 # 6b. packet_steering —— 必须设 2（RPS-only）
@@ -269,7 +302,11 @@ else
 	log "ERROR: dhcp.lan.ignore 不是 0，下游拿不到地址"
 fi
 
-log "OK: flow_offloading=$(uci -q get firewall.@defaults[0].flow_offloading) hw=$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+if [ -x /usr/bin/dae ]; then
+	log "OK: flow_offloading=$(uci -q get firewall.@defaults[0].flow_offloading) hw=$(uci -q get firewall.@defaults[0].flow_offloading_hw)（dae 变体，hw 期望为 0）"
+else
+	log "OK: flow_offloading=$(uci -q get firewall.@defaults[0].flow_offloading) hw=$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+fi
 [ -n "$(uci -q get network.wan.username)" ] || log "待办：network.wan.username/password（PPPoE 账号）"
 [ -n "$(uci -q get pon.line0_oam.loid)" ] || log "待办：pon.line0_oam.loid（LOID）"
 log "待办：上传 PON board data（1 MiB factory 镜像）"
