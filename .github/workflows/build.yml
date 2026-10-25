@@ -489,10 +489,16 @@ jobs:
         if: inputs.proxy == 'dae'
         working-directory: ${{ env.SRC }}
         run: |
-          vmlinux=$(find build_dir -maxdepth 4 -path '*linux-airoha_an7581*/vmlinux' -type f | head -1)
+          # 路径深度必须算准，否则这一步会在 3 小时后假失败：
+          #   build_dir/target-aarch64_cortex-a53_musl/linux-airoha_an7581/linux-<ver>/vmlinux
+          #   = build_dir(0) → target…(1) → linux-airoha_an7581(2) → linux-<ver>(3) → vmlinux(4)
+          # 但 LINUX_VERSION 可能带额外一级（如 linux-6.18.55），且 -path 是整段匹配，
+          # 故给足 maxdepth 6，并用宽松的 */linux-*/linux-*/vmlinux 模式，不写死 subtarget。
+          vmlinux=$(find build_dir -maxdepth 6 -type f -path '*/linux-*/linux-*/vmlinux' 2>/dev/null | head -1)
           if [ -z "$vmlinux" ]; then
-            echo "::error::找不到 vmlinux（build_dir/*/linux-airoha_an7581*/vmlinux）"
-            echo "::error::编译可能提前失败，或内核目录命名变了。"
+            echo "::error::找不到未 strip 的 vmlinux（期望 build_dir/*/linux-*/linux-*/vmlinux）"
+            echo "::error::编译可能提前失败，或内核目录命名变了。以下是所有名为 vmlinux 的产物："
+            find build_dir -maxdepth 8 -type f -name vmlinux 2>/dev/null | head -20
             exit 1
           fi
           echo "检查：$vmlinux（$(du -h "$vmlinux" | cut -f1)）"
