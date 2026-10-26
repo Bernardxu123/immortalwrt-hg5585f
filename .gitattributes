@@ -2,3 +2,16 @@
 *.patch whitespace=-indent-with-non-tab,-space-before-tab,-tab-in-indent,-trailing-space
 *.dts text eol=lf
 *.dts[io] text eol=lf
+
+# dae 相关包必须 LF。用 `text eol=lf`（而不是保留 -text）让 git 主动纠偏：
+# 提交时把 CRLF 规整成 LF，检出时也写 LF。
+# 为什么必须：2026-10-25 首次刷入 dae 固件时，这 31 个文件带着 CRLF 进了镜像，
+# 导致两个症状，且构建期完全绿灯、无从发现：
+#   1) files/dae.init 的 shebang 变成 `#!/bin/sh /etc/rc.common\r`
+#      → rc.common 解析失败 → dae 服务根本起不来（/status 返回 running:false）
+#   2) luasrc/view/dae/dae_status.htm、dae_log.htm 的 CRLF
+#      → LuCI 的 Lua 模板 parser 按 \n 切行后用 "..." 包裹代码块，
+#        残留的 \r 让字符串无法闭合 → "unfinished string near '\"'"
+#        → 所有 CBI 页面（global/dns/node/route/log）500
+package/dae/** text eol=lf
+package/luci-app-dae/** text eol=lf
