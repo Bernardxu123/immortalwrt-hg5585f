@@ -8,7 +8,7 @@
 #   是因为 parse_expr 用 ^\+ 前缀匹配，嵌套写法极易踩成 "Parse error"。
 #
 # 环境变量：
-#   PROXY=none|passwall|openclash|dae   分流层（默认 passwall）
+#   PROXY=none|passwall|openclash|dae|honk   分流层（默认 honk）
 #   ALLOW_NO_INITRAMFS=1            跳过 recovery.itb（CI 超时降级用）
 #
 # 用法：
@@ -16,7 +16,7 @@
 # 本地只验证配置层、不编译（Windows 无 perl 时用这个）：
 #   python scripts/hg5585f/kmerge.py configs/an7581.config configs/release.config \
 #       configs/hg5585f-profile.config configs/hg5585f-build.config \
-#       configs/hg5585f-proxy-passwall.config > /tmp/c.cfg
+#       configs/hg5585f-proxy-honk.config > /tmp/c.cfg
 #   python scripts/hg5585f/kmerge.py --check /tmp/c.cfg
 
 set -e
@@ -29,14 +29,15 @@ if [ ! -x "$SRC/scripts/kconfig.pl" ]; then
 	exit 1
 fi
 
-PROXY="${PROXY:-passwall}"
+PROXY="${PROXY:-honk}"
 case "$PROXY" in
 none)      PROXY_CFG= ;;
 passwall)  PROXY_CFG=configs/hg5585f-proxy-passwall.config ;;
 openclash) PROXY_CFG=configs/hg5585f-proxy-openclash.config ;;
 dae)       PROXY_CFG=configs/hg5585f-proxy-dae.config ;;
+honk)      PROXY_CFG=configs/hg5585f-proxy-honk.config ;;
 *)
-	echo "错误：PROXY='$PROXY' 不支持，只能是 none / passwall / openclash / dae" >&2
+	echo "错误：PROXY='$PROXY' 不支持，只能是 none / passwall / openclash / dae / honk" >&2
 	exit 1
 	;;
 esac

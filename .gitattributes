@@ -15,3 +15,10 @@
 #        → 所有 CBI 页面（global/dns/node/route/log）500
 package/dae/** text eol=lf
 package/luci-app-dae/** text eol=lf
+
+# honk 相关包必须 LF。原因同上：init 的 shebang、LuCI 的 JS/模板、.dae 配置
+# 带 CRLF 都会在设备上以难排查的方式失败（构建期看不出来）。
+package/honk/** text eol=lf
+package/vmlinux-btf-builtin/** text eol=lf
+package/luci-app-honk/** text eol=lf
+package/luci-lib-daeuniverse/** text eol=lf

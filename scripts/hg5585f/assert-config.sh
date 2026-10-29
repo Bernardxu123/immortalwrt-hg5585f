@@ -103,8 +103,8 @@ need_y PACKAGE_zram-swap
 need_unset TARGET_airoha_an7583
 need_unset TARGET_airoha_en7523
 
-# ---- 12. 分流层（由 gen-config.sh 通过 PROXY 传入，默认 passwall）----
-case "${PROXY:-passwall}" in
+# ---- 12. 分流层（由 gen-config.sh 通过 PROXY 传入，默认 honk）----
+case "${PROXY:-honk}" in
 passwall)
 	need_y PACKAGE_luci-app-passwall
 	need_y PACKAGE_luci-app-passwall_INCLUDE_Xray
@@ -142,19 +142,49 @@ dae)
 	need_unset PACKAGE_sing-box
 	need_unset PACKAGE_hysteria
 	;;
+honk)
+	need_y PACKAGE_honk
+	need_y PACKAGE_luci-app-honk
+	need_y PACKAGE_luci-lib-daeuniverse
+	need_y PACKAGE_luci-i18n-daeuniverse-zh-cn
+	need_y PACKAGE_vmlinux-btf-builtin
+	need_y PACKAGE_kmod-sched-core
+	need_y PACKAGE_kmod-sched-bpf
+	need_y PACKAGE_kmod-veth
+	need_y PACKAGE_kmod-nft-core
+	need_y PACKAGE_kmod-nft-queue
+	need_y PACKAGE_kmod-nfnetlink-queue
+	need_y PACKAGE_kmod-nf-conntrack
+	need_y PACKAGE_v2ray-geoip
+	need_y PACKAGE_v2ray-geosite
+	need_y PACKAGE_ca-bundle
+	# honk 和 dae 互斥（dae0/daens 同名）
+	need_unset PACKAGE_dae
+	need_unset PACKAGE_luci-app-dae
+	need_unset PACKAGE_luci-i18n-dae-zh-cn
+	# "只保留一种代理"
+	need_unset PACKAGE_luci-app-passwall
+	need_unset PACKAGE_luci-app-openclash
+	# 不把 Rust 工具链拉进构建（上游 an7581.config 默认开了这两个）
+	need_unset PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client
+	need_unset PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server
+	need_unset PACKAGE_xray-core
+	need_unset PACKAGE_sing-box
+	need_unset PACKAGE_hysteria
+	;;
 *)
-	err "PROXY='${PROXY}' 不支持（none|passwall|openclash|dae）"
+	err "PROXY='${PROXY}' 不支持（none|passwall|openclash|dae|honk）"
 	;;
 esac
 
-# ---- 13. dae 的 BTF 依赖链（PROXY=dae 时逐项验证）----
-# 这一组全部是"静默失败"型：符号丢了不报错，只是 BTF 不生成、dae 起不来。
+# ---- 13. eBPF 数据面的 BTF 依赖链（PROXY=dae|honk 时逐项验证）----
+# 这一组全部是"静默失败"型：符号丢了不报错，只是 BTF 不生成、dae/honk 起不来。
 # 依赖链（任一项不满足，DEBUG_INFO_BTF 都会被 kconfig 悄悄丢弃）：
 #   KERNEL_DEBUG_INFO=y
 #   KERNEL_DEBUG_INFO_REDUCED 必须 not set
 #   KERNEL_DEBUG_INFO_BTF=y
 #   + 核心层 DEBUG_INFO_DWARF4=y（由 an7581/config-6.18 保证，不在 .config 里）
-if [ "${PROXY:-passwall}" = "dae" ]; then
+if [ "${PROXY:-honk}" = "dae" ] || [ "${PROXY:-honk}" = "honk" ]; then
 	need_y KERNEL_DEBUG_INFO
 	need_unset KERNEL_DEBUG_INFO_REDUCED
 	need_y KERNEL_DEBUG_INFO_BTF
@@ -162,6 +192,7 @@ if [ "${PROXY:-passwall}" = "dae" ]; then
 	need_y KERNEL_CGROUP_BPF
 	need_y KERNEL_XDP_SOCKETS
 	need_y KERNEL_KPROBES
+	need_y KERNEL_NETKIT
 fi
 
 if [ "$fail" -ne 0 ]; then
@@ -174,4 +205,4 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 
-echo "配置断言通过：2 个 device profile（cu/ct）、关键包齐备、未装 br_netfilter、分流=${PROXY:-passwall}"
+echo "配置断言通过：2 个 device profile（cu/ct）、关键包齐备、未装 br_netfilter、分流=${PROXY:-honk}"

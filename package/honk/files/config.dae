@@ -1,0 +1,93 @@
+# Minimal HG5585F (AN7581) configuration for honk-core.
+#
+# Installed as /etc/honk/config.dae. This skeleton routes everything directly
+# so that enabling the service cannot break connectivity before nodes or
+# subscriptions are configured. Add a subscription/group and change the routing
+# fallback once the direct-only datapath has been verified.
+#
+# The UCI switch is /etc/config/honk (option enabled '0' by default):
+#   uci set honk.config.enabled='1'
+#   uci commit honk
+#   /etc/init.d/honk enable && /etc/init.d/honk start
+#
+# doona panel: http://<router-LAN-IP>:9090/ui/ (first visit creates the admin)
+# Keep port 9090 on LAN only; do not expose it to WAN.
+
+global {
+    wan_interface: auto
+    lan_interface: br-lan
+    data_dir: '/etc/honk'
+    log_level: info
+    # Empty = stdout, procd forwards to syslog/logread.
+    log_file: ''
+    dial_mode: domain
+    auto_config_kernel_parameter: true
+    bootstrap_resolver: '223.5.5.5:53'
+    nfqueue_enable: true
+    check_interval: 300s
+    tcp_check_url: 'https://www.gstatic.com/generate_204'
+    tcp_check_http_method: HEAD
+}
+
+dns {
+    upstream {
+        # dnsmasq on this router; honk's own lookups are not self-intercepted.
+        local: 'udp://127.0.0.1:53'
+    }
+    routing {
+        request {
+            qname(suffix: lan, suffix: local) -> local
+            fallback: local
+        }
+        response {
+            fallback: accept
+        }
+    }
+}
+
+routing {
+    # Direct-only baseline. Replace with proxy rules after adding nodes, e.g.:
+    #   dip(geoip: private) -> direct(must)
+    #   domain(geosite: cn) -> direct
+    #   fallback: Proxy
+    fallback: direct
+}
+
+experimental {
+    native_api {
+        enabled: true
+        listen: '0.0.0.0:9090'
+        password_auth: true
+        config_write: true
+        ui: 'embedded'
+    }
+    cache_file {
+        enabled: true
+        store_dns: true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# After the direct-only check passes, add a subscription/group like this and
+# replace `routing { fallback: direct }` above with `fallback: Proxy`:
+#
+# subscription {
+#     wugui: 'https://example.invalid/subscription' {
+#         ua: 'clash.meta/1.19.30'
+#         interval: 86400s
+#         cache: true
+#         route: direct
+#     }
+# }
+#
+# group {
+#     Proxy {
+#         filter: subtag(wugui)
+#         policy: score
+#         final: block
+#     }
+# }
+#
+# For a proxied remote DNS resolver, add it under dns.upstream and target it:
+#     remote: 'https://1.1.1.1/dns-query' -> Proxy
+# ---------------------------------------------------------------------------

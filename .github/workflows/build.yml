@@ -21,14 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       proxy:
-        description: '分流内核（none=不含代理；dae=eBPF 单内核；passwall 适合小内存；openclash 需要 Ruby）'
+        description: '分流内核（honk=eBPF 新内核，默认；dae=旧 eBPF；passwall/openclash=传统；none=不含代理）'
         type: choice
         options:
+          - honk
+          - dae
           - passwall
           - openclash
-          - dae
           - none
-        default: passwall
+        default: honk
       build_recovery:
         description: '同时产出 recovery.itb（initramfs 救援镜像，约多 10-16 分钟）'
         type: boolean
@@ -146,14 +147,14 @@ jobs:
       #   depends on PAHOLE_VERSION >= 116
       #   depends on DEBUG_INFO_DWARF4 || PAHOLE_VERSION >= 121
       # pahole 不满足时，kconfig 会**静默**把 DEBUG_INFO_BTF 丢成 not set：
-      # 编译照样绿灯，产物没有 .BTF，dae 启动时才炸（本项目已踩两次）。
+      # 编译照样绿灯，产物没有 .BTF，dae/honk 启动时才炸（本项目已踩两次）。
       # 本步骤只验证宿主机 pahole 可用且 >= 116（BTF 的底线要求）。
       # ---------------------------------------------------------------------
       - name: 断言 pahole 可用（BTF 前置）
         run: |
           if ! command -v pahole >/dev/null 2>&1; then
             echo "::error::pahole 不可用。CONFIG_DEBUG_INFO_BTF 会被 kconfig 静默丢弃，"
-            echo "::error::结果是：编译绿灯、镜像无 .BTF、dae 启动即 FATAL。请把 dwarves 加回 apt 列表。"
+            echo "::error::结果是：编译绿灯、镜像无 .BTF、dae/honk 启动即 FATAL。请把 dwarves 加回 apt 列表。"
             exit 1
           fi
           ver_raw=$(pahole --version 2>&1 | head -1)
@@ -169,7 +170,7 @@ jobs:
           ver=$(( major * 100 + minor ))
           if [ "$ver" -lt 116 ]; then
             echo "::error::pahole 版本过低（需要 >= 1.16，当前：${ver_raw}）"
-            echo "::error::BTF 会被 kconfig 静默丢弃，构建虽然绿灯但 dae 无法启动。"
+            echo "::error::BTF 会被 kconfig 静默丢弃，构建虽然绿灯但 dae/honk 无法启动。"
             exit 1
           fi
           echo "OK: pahole ${major}.${minor} >= 1.16，满足 CONFIG_DEBUG_INFO_BTF 底线"
@@ -223,7 +224,12 @@ jobs:
                    files/etc/config/pon \
                    files/etc/config/dhcp \
                    configs/hg5585f-profile.config \
-                   configs/hg5585f-build.config; do
+                   configs/hg5585f-build.config \
+                   configs/hg5585f-proxy-honk.config \
+                   package/honk/Makefile \
+                   package/honk/files/config.dae \
+                   package/honk/files/honk.init \
+                   package/vmlinux-btf-builtin/Makefile; do
             if [ ! -f "$f" ]; then
               echo "::error::缺少 $f"
               exit 1
@@ -238,7 +244,7 @@ jobs:
             export ALLOW_NO_INITRAMFS=1
           fi
           export PROXY="${{ inputs.proxy }}"
-          echo "分流层：${PROXY:-passwall}（空值 = tag 触发，走 passwall）"
+          echo "分流层：${PROXY:-honk}（空值 = tag 触发，走 honk）"
           sh scripts/hg5585f/gen-config.sh
 
       # ---------------------------------------------------------------------
@@ -475,18 +481,20 @@ jobs:
           CCACHE_DIR="$SRC/.ccache" ccache -s || true
 
       # ---------------------------------------------------------------------
-      # .BTF 段断言（仅 PROXY=dae）：确认内核真的带 BTF 出去
+      # .BTF 段断言（PROXY=dae|honk）：确认内核真的带 BTF 出去
       #
       # pahole 断言只保证「宿主机有能力」，不保证「kconfig 真的把 BTF 编进去了」。
       # 内核 DEBUG_INFO_BTF 还有 depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED，
       # 任何一条不满足都会被静默丢弃。所以这里直接读产物：
-      # 没有 .BTF 段 = dae 启动必 FATAL（BpfLoopFeatureVersion 硬门槛之外的另一道）。
+      # 没有 .BTF 段 = dae/honk 启动必 FATAL（BpfLoopFeatureVersion 硬门槛之外的另一道）。
       #
       # 必须查未 strip 的 vmlinux（$(LINUX_DIR)/vmlinux）。
       # $(KERNEL_BUILD_DIR)/vmlinux.elf 是 objcopy -S 之后的，.BTF 可能已被剥掉。
       # ---------------------------------------------------------------------
-      - name: 断言内核镜像含 .BTF 段（仅 dae）
-        if: inputs.proxy == 'dae'
+      - name: 断言内核镜像含 .BTF 段（dae/honk）
+        # 空值 = tag 触发，默认走 honk，也必须断言 BTF；
+        # passwall/openclash/none 不需要 BTF。
+        if: inputs.proxy != 'passwall' && inputs.proxy != 'openclash' && inputs.proxy != 'none'
         working-directory: ${{ env.SRC }}
         run: |
           # 路径深度必须算准，否则这一步会在 3 小时后假失败：
@@ -511,7 +519,7 @@ jobs:
             readelf -S "$vmlinux" | grep -A1 '\.BTF' | head -4
           else
             echo "::error::内核镜像缺少 .BTF 段！"
-            echo "::error::dae 启动会 FATAL（无法加载 eBPF）。排查顺序："
+            echo "::error::dae/honk 启动会 FATAL（无法加载 eBPF）。排查顺序："
             echo "::error::  1) pahole --version >= 1.16（上一步已断言，应已通过）"
             echo "::error::  2) CONFIG_KERNEL_DEBUG_INFO=y 且 !CONFIG_KERNEL_DEBUG_INFO_REDUCED"
             echo "::error::  3) CONFIG_KERNEL_DEBUG_INFO_BTF=y 是否被 kconfig 丢弃"
@@ -582,7 +590,7 @@ jobs:
           fi
           echo "发布标签：$TAG"
 
-          PROXY="${{ inputs.proxy }}"; PROXY="${PROXY:-passwall}"
+          PROXY="${{ inputs.proxy }}"; PROXY="${PROXY:-honk}"
           {
             echo "PonWrt for FiberHome HG5585F（Airoha AN7581，联通 10G-EPON 非对称）"
             echo ""
@@ -594,8 +602,8 @@ jobs:
             echo ""
             echo '| 文件 | 用途 |'
             echo '|---|---|'
-            echo '| `*hg5585f-cu*sysupgrade.itb` | CU（联通现役机）系统镜像 |'
-            echo '| `*hg5585f-ct*sysupgrade.itb` | CT（试刀机）系统镜像 |'
+            echo '| `*hg5585f-cu*sysupgrade.itb` | CU（测试机）系统镜像；honk 首次验证只刷这个 |'
+            echo '| `*hg5585f-ct*sysupgrade.itb` | CT（主路由/生产机）系统镜像；验证通过前不要刷 |'
             echo '| `*initramfs-recovery.itb` | 救援镜像，U-Boot 可内存启动 |'
             echo '| `config.buildinfo` / `config.full` | 本次构建的完整配置 |'
             echo '| `sha256sums.txt` | 校验和 |'
@@ -605,7 +613,7 @@ jobs:
             echo "- PON：\`epon-10g-1g\` + OAM \`ctc\` + \`ge_ports=4\`"
             echo "- 形态：PPPoE 主路由（\`wan=pon0.995/pppoe/mtu1492\`，\`wan6=dhcpv6\`，\`br-lan=lan1..4\`，LAN \`192.168.31.1/24\`）"
             echo "- \`pon-watchdog\` 默认启用（兜底上游 Issue #42 的 10G-EPON 冷启动 MPCP 自循环）"
-            echo "- WiFi 默认关闭；UPnP / br_netfilter / EN7572 / BTF 均不启用"
+            echo "- WiFi 默认关闭；UPnP / br_netfilter / EN7572 不启用；BTF 仅在 dae/honk 分流变体启用"
             echo ""
             echo "## ⚠ 刷机前置"
             echo ""
