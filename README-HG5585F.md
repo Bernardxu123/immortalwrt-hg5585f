@@ -14,7 +14,7 @@ immortalwrt/immortalwrt            ← 底座
 pbs05/ponwrt                       ← PON/AN7581 内核补丁 + 8 款整机 + PON feeds
         │  本仓库 = fork + 纯增量文件
         ▼
-Bernardxu123/ponwrt-hg5585f
+Bernardxu123/immortalwrt-hg5585f
 ```
 
 **为什么不能直接编 immortalwrt**：immortalwrt 上游的 `target/linux/airoha` 里没有 FiberHome，
@@ -25,12 +25,29 @@ Bernardxu123/ponwrt-hg5585f
 ```
 configs/hg5585f-profile.config        12 个 device → 2 个
 configs/hg5585f-build.config          ccache / 能力锚点 / 去掉 UPnP / zram / PON 栈
+configs/hg5585f-proxy-honk.config     honk beta3 + BTF + doona 面板
 files/                                首启注入 + 看门狗 + 绑核/温度服务 + sysctl 调优 + 静态 config + banner
                                       （QWRT 逆向借鉴清单见《QWRT-分析/优化借鉴与落地.md》）
 scripts/hg5585f/                      配置生成 / 断言 / 产物校验 / 本地干跑
+package/honk/                         honk-core 预编译包 + procd init + UCI + 默认配置
+package/vmlinux-btf-builtin/           内核自带 BTF 的 +vmlinux-btf 虚依赖
+package/luci-app-honk/ + luci-lib-daeuniverse/  LuCI 状态/配置编辑页
+target/linux/generic/{backport,pending}-6.18/  ImmortalWrt 2026-10-25 的 flowtable/VLAN/DSA 修复
 .github/workflows/build.yml           只编 an7581 + HG5585F 两个 profile
 README-HG5585F.md                     本文件
 ```
+
+**新库基线（2026-10-30）**：本仓库由 `ponwrt-hg5585f` 更名为 `immortalwrt-hg5585f`，
+仍然是 `pbs05/ponwrt` 的 fork（ImmortalWrt master + AN7581/PON 适配）。
+已选入的 ImmortalWrt 更新只包含 3 个新增文件型内核补丁（不整树 merge）：
+
+- `be75fbfa9b`：flowtable 使用 VLAN ID 而非完整 TCI
+- `09fe0f8140`：bridge roaming flow 的 flowtable 检查
+- `c7924dcd74`：DSA host FDB 按端口跟踪
+
+**暂不取**：ImmortalWrt 2026-10-26 的整树 `Merge Official Source`、`firewall4` 升级/refresh
+（本地 firewall4 仍 pin 2025-03-17，会牵动 fullcone 与 bridge-flowtable 补丁），以及仅影响
+构建自测的 `kselftests-bpf`。等 `pbs05/ponwrt` 下一次官方 merge 后再跟整树更新。
 
 ---
 
@@ -68,8 +85,8 @@ git tag v2026.10.17-2 && git push origin v2026.10.17-2
 ### 3.2 本地
 
 ```sh
-git clone --depth 1 https://github.com/Bernardxu123/ponwrt-hg5585f.git
-cd ponwrt-hg5585f
+git clone --depth 1 https://github.com/Bernardxu123/immortalwrt-hg5585f
+cd immortalwrt-hg5585f
 ./scripts/feeds update -a && ./scripts/feeds install -a
 sh scripts/hg5585f/gen-config.sh          # 内含 make defconfig + 断言
 make -j$(( $(nproc) + 1 ))
@@ -304,7 +321,7 @@ uci commit firewall && /etc/init.d/firewall restart
 `-cu` 镜像验证，CT 主路由验证通过前不要刷：
 
 ```sh
-gh workflow run build-hg5585f --repo Bernardxu123/ponwrt-hg5585f --ref master \
+gh workflow run build-hg5585f --repo Bernardxu123/immortalwrt-hg5585f --ref master \
   -f proxy=honk -f build_recovery=true
 ```
 
