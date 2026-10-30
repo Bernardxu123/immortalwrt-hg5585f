@@ -320,6 +320,11 @@ uci commit firewall && /etc/init.d/firewall restart
 由 workflow 的 `proxy` 输入决定，默认 **honk**（eBPF 新内核）。CU 测试机先刷
 `-cu` 镜像验证，CT 主路由验证通过前不要刷：
 
+> 注意：`proxy=honk` 只是把 honk **编进固件**；`honk.config.enabled` 默认是 `0`
+> （出场不启用），首次使用需按下方命令手动启用。未启用 honk 时它不接管流量，
+> 但 `99-hg5585f-setup` 仍按"honk 二进制存在"把 `flow_offloading_hw` 设为 `0`
+> （保守值，避免启用后与 eBPF 冲突）。
+
 ```sh
 gh workflow run build-hg5585f --repo Bernardxu123/immortalwrt-hg5585f --ref master \
   -f proxy=honk -f build_recovery=true
