@@ -46,8 +46,12 @@ dns {
 }
 
 routing {
+    # Keep router-local management and LAN destinations out of the transparent
+    # proxy path. In particular, the doona panel on :9090 must stay reachable.
+    dip(geoip: private) -> direct(must)
+    dport(9090) -> direct(must)
+
     # Direct-only baseline. Replace with proxy rules after adding nodes, e.g.:
-    #   dip(geoip: private) -> direct(must)
     #   domain(geosite: cn) -> direct
     #   fallback: Proxy
     fallback: direct
