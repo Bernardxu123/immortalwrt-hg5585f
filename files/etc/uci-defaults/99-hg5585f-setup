@@ -268,6 +268,10 @@ if [ -x /sbin/wifi ]; then
 	uci -q commit wireless
 fi
 
+# LuCI 状态页的“温度”来自 `luci.getTempInfo`，它直接 popen /sbin/tempinfo。
+# overlay 的 files/sbin/tempinfo 必须是 0755，否则页面只显示 “?”。
+[ -f /sbin/tempinfo ] && chmod 0755 /sbin/tempinfo
+
 # ---------------------------------------------------------------------------
 # 8. 时间同步与时区
 # ---------------------------------------------------------------------------
