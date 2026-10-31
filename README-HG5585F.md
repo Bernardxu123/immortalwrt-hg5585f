@@ -71,9 +71,11 @@ README-HG5585F.md                     本文件
 
 ```sh
 gh workflow run build-hg5585f
+# 默认 sync_upstream=true + update_honk=true；要可复现就显式关掉：
+# gh workflow run build-hg5585f -f sync_upstream=false -f update_honk=false
 # base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测）
 gh workflow run build-hg5585f -f proxy=none
-# 或打 tag 触发 + 自动发 Release
+# 或打 tag 触发 + 自动发 Release（tag 构建不自动同步上游/honk）
 git tag v2026.10.17-2 && git push origin v2026.10.17-2
 ```
 
@@ -112,8 +114,8 @@ git merge upstream/master     # 改动以新增文件为主
 git push origin master
 ```
 
-上游 merge 后不要自动重编：先看 `git log upstream/master` 有没有内核/驱动大改，再手动 dispatch。
-出正式固件只认 tag。
+手动 merge 上游后，先看 `git log upstream/master` 有没有内核/驱动大改，再手动 dispatch；
+自动同步见 §3.4。出正式固件只认 tag。
 
 ### 3.4 构建时自动跟随上游/软件（2026-10-31 起）
 
