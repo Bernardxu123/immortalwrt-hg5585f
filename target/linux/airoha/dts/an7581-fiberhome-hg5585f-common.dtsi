@@ -324,6 +324,9 @@
 			reg = <0x0000 0 0 0 0>;
 			nvmem-cells = <&wifi_eeprom>;
 			nvmem-cell-names = "eeprom";
+			/* Not consumed by mainline mt76. Keep WiFi NPU offload disabled:
+			 * AN7581 + MT7916 WiFi offload has a known ~256 Mbps bridge issue.
+			 */
 			airoha,npu = <&npu>;
 			airoha,eth = <&eth>;
 		};

@@ -221,17 +221,22 @@ fi
 uci -q set network.globals.packet_steering='2'
 
 # ---------------------------------------------------------------------------
-# 6c. 启用随包附带的两个绑核服务
+# 6c. 启用随包附带的绑核/校验服务
 #
 #   irq-affinity       ：把 airoha_eth 的大中断（irq23/27）从 CPU0 挪到 CPU1/CPU2。
 #                        mt7915e 的 irq19/53 内核禁止用户态改，保持 CPU0。
 #   wifi-napi-affinity ：把 mt76 的 6 个 napi/phy0-N 线程钉到 CPU3
 #                        （单芯片双频，phy0/phy1 共用同一组 NAPI 线程）。
+#   mt7916-an-eeprom-check：只读校验 factory+0x1000/4KB/0x1679（不写任何分区）。
 #
-#   两者都只是**负载分布**优化，实测对峰值吞吐无影响（678 vs 673 Mbps）。
+#   前两者只是**负载分布**优化，实测对峰值吞吐无影响（678 vs 673 Mbps）。
 #   代码与说明见 files/etc/init.d/ 下同名脚本。
 # ---------------------------------------------------------------------------
-for svc in irq-affinity wifi-napi-affinity; do
+# files/ 里的脚本可能因 Windows/归档丢掉执行位；首启兜底 chmod。
+for f in /etc/init.d/mt7916-an-eeprom-check /usr/sbin/wifi-enable; do
+	[ -f "$f" ] && chmod 0755 "$f"
+done
+for svc in irq-affinity wifi-napi-affinity mt7916-an-eeprom-check; do
 	if [ -x "/etc/init.d/$svc" ]; then
 		"/etc/init.d/$svc" enable >/dev/null 2>&1
 		"/etc/init.d/$svc" start  >/dev/null 2>&1 &

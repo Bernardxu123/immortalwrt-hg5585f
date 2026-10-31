@@ -71,6 +71,8 @@ README-HG5585F.md                     本文件
 
 ```sh
 gh workflow run build-hg5585f
+# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测）
+gh workflow run build-hg5585f -f proxy=none
 # 或打 tag 触发 + 自动发 Release
 git tag v2026.10.17-2 && git push origin v2026.10.17-2
 ```
@@ -89,6 +91,8 @@ git clone --depth 1 https://github.com/Bernardxu123/immortalwrt-hg5585f
 cd immortalwrt-hg5585f
 ./scripts/feeds update -a && ./scripts/feeds install -a
 sh scripts/hg5585f/gen-config.sh          # 内含 make defconfig + 断言
+# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测）
+# PROXY=none sh scripts/hg5585f/gen-config.sh
 make -j$(( $(nproc) + 1 ))
 ```
 
@@ -120,7 +124,7 @@ git push origin master
 | U-Boot（`firstblock.bin` + `bl31-u-boot.fip`） | 物料已有 | 原厂 boot 不认 `sysupgrade.itb` |
 | root（TTL 串口 115200 8N1，3.3V） | 未执行 | 拿不到 `mtd13 factory` 备份 |
 | **APONCAL 光模块校准（factory `0x0`，2 KB）** | **未取到** | **PON 完全起不来** |
-| **MT7916 WiFi EEPROM（factory `0x1000`，4 KB）** | **未取到** | WiFi 起不来（默认关，影响可控） |
+| **MT7916 WiFi EEPROM（factory `0x1000`，4 KB）** | **本机 `factory-1m.bin` 已验证**（offset 0x1000、4 KB、magic `16 79`；CT/CU 各自不同） | 刷入本机 factory；首启 `mt7916-an-eeprom-check` 只读校验；跨设备使用会校准错误 |
 | 1 MiB `factory` 镜像写回 | 依赖上一条 | MAC / SN 错，OLT 拒绝注册 |
 | LOID | 已知（不预置） | 不注册 |
 | PPPoE 账号 | 已知（不预置） | 拨不上号 |
@@ -176,7 +180,7 @@ HG5585F 侧：
 ```
 pon0                 PON 口
 pon0.995             802.1q VLAN 995 = 联通 INTERNET（WAN）
-wan                  proto=pppoe / device=pon0.995 / MTU·MRU 1492
+wan                  proto=pppoe / device=pon0.995 / UCI MTU·MRU 1500（pppd 协商 1492）
 wan6                 @wan / dhcpv6（联通 IPv6）
 br-lan               lan1 lan2 lan3 lan4（不含 pon0.995）
 lan                  192.168.31.1/24 + DHCP/RA
@@ -209,6 +213,42 @@ uci commit network && uci commit dhcp
 注意：桥接模式下看门狗需要拆 `lan` 才能卸载 `pon0.995`，会短暂断管理面；本版默认的
 `ifdown wan` 恢复逻辑是按主路由模式写的。
 
+### 6.1 启用 WiFi（可选）
+
+WiFi 默认 `disabled=1`。启用时直接跑：
+
+```sh
+wifi-enable
+```
+
+该脚本会设 `country=CN`、2.4G `ch11/HE20`、5G `ch149/HE80`（对齐 QWRT 的工作配置），
+不改 `txpower`。检查：
+
+```sh
+iw reg get
+iw dev
+```
+
+注意：
+- 5G 必须 `country=CN`，否则 ch149 可能被标成 NO-IR；
+- 不要抄 QWRT 的 `txpower=100` —— 那是 vendor 的百分比，mt76 的 UCI 用 dBm；
+- 本脚本不启用 802.11k/v/r；只有把 HG5585F 当第二个 OpenWrt AP 并跑 steering 守护进程时才需要。
+
+### 6.2 MT7916 EEPROM 校验（只读，不影响 U-Boot）
+
+`mt7916-an-eeprom-check` 首启只读检查 `factory` 卷偏移 0x1000 的 4 KiB 数据、magic `0x1679`，
+**不写 mtd/UBI，不碰 `fit`/`fip`/`ubootenv`**；U-Boot 启动读的是 `fit` 卷，sysupgrade 也只写
+`fit` 卷，所以这个检查不会影响刷机/启动。它只是把“EEPROM 缺失/无效”从静默 WiFi 失败变成
+`logread -e mt7916-eeprom` 里的一条明确日志。
+
+刷机前可在主机侧先验证本机备份：
+
+```sh
+python3 scripts/hg5585f/check-factory-eeprom.py 原厂备份-CT/factory-1m.bin
+```
+
+`factory-1m.bin` 每台设备唯一，不要用别人的。
+
 ---
 
 ## 7. 针对本机做的优化
@@ -217,7 +257,7 @@ uci commit network && uci commit dhcp
 |---|---|---|
 | 编译收敛 | 12 个 device profile → 2 个 | `PER_DEVICE_ROOTFS=y` 下每个 device 独立内核链接 + 独立 rootfs |
 | 二次构建加速 | `CONFIG_CCACHE=y` + CI 统一用 `$SRC/.ccache` | 改 overlay 后重编从 ~3h 降到 ~1h |
-| **flow offload** | `flow_offloading=1` + `flow_offloading_hw=1` | 路由模式下 **inet flowtable + AN7581 PPE** 可以卸载 PPPoE（驱动支持 `TC_SETUP_FT` / `FLOW_ACTION_PPPOE_PUSH`）。**桥接模式下这条不命中 PPPoE**，所以现在是它真正有意义的形态 |
+| **flow offload** | honk/dae：`flow_offloading=1` + `flow_offloading_hw=0`；未装 dae/honk（`PROXY=none/passwall/openclash`）：`1/1` | mainline `airoha_ppe` 支持 `FLOW_ACTION_PPPOE_PUSH`（1 VLAN + 1 PPPoE），路由模式可卸载 PPPoE；honk/dae 的 TC/eBPF 可能被硬件卸载旁路，故保守 `hw=0`；**QWRT 7.3 vendor 模块无 PPPoE 封装，其 `flow_offloading=0` 铁律不适用本固件** |
 | 不装 br_netfilter | `kmod-br-netfilter` 保持 not set | 桥接帧进 iptables 的元凶；与 `nf_conntrack_bridge` 是两回事 |
 | PON 参数预设 | `mode=epon-10g-1g`、`operator=ctc`、`ge_ports=4` | 原厂 `current_ponmode=EPON_10G`、`port_num=4` |
 | WiFi 默认关 | radio `disabled=1` | 小米 BE6500 Pro 继续做 AP；避免同一空间双 AP 干扰 |
@@ -293,14 +333,14 @@ cat /tmp/pon-watchdog.log
 | EPON OAM profile | `ctc` | `uci set pon.line0_oam.operator='ieee'` |
 | 硬件 flow offload | `flow_offloading_hw=1` | 吞吐反而下降就 `uci set firewall.@defaults[0].flow_offloading_hw='0'` |
 | IPv6 | 开 | `uci set network.wan.ipv6='0'; uci delete network.wan6` + `uci set network.lan.ipv6='0'` |
-| WiFi | 关 | `uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'` + `wifi up` |
+| WiFi | 关 | `wifi-enable`（自动设 CN/ch11 HE20/ch149 HE80）；或手工 `uci set ...disabled='0'` + `wifi reload` |
 | zram | 开 | `uci set system.zram.enabled='0'` 或停用 `zram-swap` |
 | 看门狗灵敏度 | 40s / mpcp_delta≥3 | 改 `files/usr/sbin/pon-watchdog` 头部常量 |
 
 **待实测确认的假设**：
 
 1. 联通 995 是否真是 `pon0` 上的 802.1q tag → `tcpdump -i pon0 -e -n vlan`
-2. PPPoE 在 `pon0.995` 上能否拨通（MTU/MRU 1492）
+2. PPPoE 在 `pon0.995` 上能否拨通（UCI MTU/MRU 1500；pppd 协商 1492）
 3. `ifdown wan` + 删 `pon0.995` + 模块重载后，`ifup wan` 能否干净重建 VLAN
 4. `mpcp_timeouts` 在正常注册与故障自循环下的实际斜率
 5. `flow_offloading_hw` 在 AN7581 路由模式下是否真的带上 `flags offload`（`nft list flowtable inet fw4` / PPE debugfs）
