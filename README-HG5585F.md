@@ -115,6 +115,17 @@ git push origin master
 上游 merge 后不要自动重编：先看 `git log upstream/master` 有没有内核/驱动大改，再手动 dispatch。
 出正式固件只认 tag。
 
+### 3.4 构建时自动跟随上游/软件（2026-10-31 起）
+
+手动 `workflow_dispatch` 默认：
+
+- `sync_upstream=true`：构建前 `git fetch` 并 merge `pbs05/ponwrt` 最新 `master`；**冲突直接失败**，不会悄悄选一边；
+- `update_honk=true`：构建前从 `daeuniverse/honk` 拉**最新 release（含 beta）**的 aarch64 musl `stock-full` 资产，自动改写 `package/honk/Makefile` 的版本/URL/hash；API/资产异常时回退到仓库里 pinned 的版本，不阻塞构建；
+- feeds 本来每次 `feeds update -a`，跟默认分支最新；
+- **tag 构建跳过 `sync_upstream`/`update_honk`**，保证 release 可复现；手动构建的 Release notes 会记录 `上游同步` 和 `honk` 版本。
+
+想要完全可复现时，手动 dispatch 把这两个开关关掉，或把 feeds 钉到固定 commit；想要最新就保持默认。自动 merge 冲突的处理：本地 merge 解决后 commit/push，再重新 dispatch。
+
 ---
 
 ## 4. 刷机前置（本仓库交付不了的部分）

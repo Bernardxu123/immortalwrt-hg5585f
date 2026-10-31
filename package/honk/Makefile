@@ -15,6 +15,9 @@
 # BTF is provided by the running kernel (CONFIG_KERNEL_DEBUG_INFO_BTF=y);
 # vmlinux-btf-builtin only satisfies the virtual +vmlinux-btf dependency.
 #
+# The values below are the reproducible fallback. CI's update-honk.py refreshes
+# them to the newest upstream release (including betas) on manual builds.
+#
 # This file is free software, licensed under the GNU General Public License v3
 # or later.
 #
@@ -26,19 +29,19 @@ PKG_DIR:=$(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_VERSION:=0.1.0_beta3
+PKG_VERSION:=0.1.0_beta4
 PKG_RELEASE:=1
 PKGARCH:=aarch64_cortex-a53
 
-PKG_SOURCE:=honk-core-v0.1.0-beta.3-aarch64-unknown-linux-musl-stock-full.tar.gz
-PKG_SOURCE_URL:=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.3
-PKG_HASH:=770fe83aa09322ddffe1f16565a681e1ae1fb93db8746bc65db8b5d4d30fa55c
+PKG_SOURCE:=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-stock-full.tar.gz
+PKG_SOURCE_URL:=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4
+PKG_HASH:=9b2e30d68b3be216ef7c959f6266ee39ff2291be83fb7b60beeb05254f4becc6
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=PonWrt contributors
 
-HONK_EXTRACT_DIR:=honk-core-v0.1.0-beta.3-aarch64-unknown-linux-musl-stock-full
+HONK_EXTRACT_DIR:=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-stock-full
 
 include $(INCLUDE_DIR)/package.mk
 

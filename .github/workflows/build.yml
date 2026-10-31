@@ -42,6 +42,14 @@ on:
         description: 'Release 标签（留空 = tag 触发用 ref 名，手动触发用 v<日期>-<短SHA>）'
         type: string
         default: ''
+      sync_upstream:
+        description: '构建前 merge pbs05/ponwrt master 最新（冲突会让构建失败；tag 构建始终跳过）'
+        type: boolean
+        default: true
+      update_honk:
+        description: '构建前拉 daeuniverse/honk 最新 release（含 beta；tag 构建始终跳过）'
+        type: boolean
+        default: true
   push:
     tags:
       - 'v*'
@@ -69,7 +77,7 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: 记录版本信息 / 周号
         id: meta
@@ -207,6 +215,14 @@ jobs:
           ccache -s
 
       # ---------------------------------------------------------------------
+      # 上游/软件自动跟随（仅 workflow_dispatch；tag 构建跳过，保证可复现）
+      # ---------------------------------------------------------------------
+      - name: 同步 pbs05/ponwrt 上游
+        if: inputs.sync_upstream
+        working-directory: ${{ env.SRC }}
+        run: sh scripts/hg5585f/sync-upstream.sh
+
+      # ---------------------------------------------------------------------
       # feeds：两个私有 feed（pon_drivers / pon_userspace）是 PON 功能的前提
       # ---------------------------------------------------------------------
       - name: 更新 feeds
@@ -236,6 +252,13 @@ jobs:
             fi
           done
           echo "overlay 文件齐全"
+
+      - name: 更新 honk 到最新 release
+        if: inputs.update_honk
+        working-directory: ${{ env.SRC }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/hg5585f/update-honk.py
 
       - name: 生成 .config（含断言）
         working-directory: ${{ env.SRC }}
@@ -595,6 +618,8 @@ jobs:
             echo "PonWrt for FiberHome HG5585F（Airoha AN7581，联通 10G-EPON 非对称）"
             echo ""
             echo "- 源码 commit：\`${{ env.COMMIT }}\`"
+            echo "- 上游同步：\`${UPSTREAM_SHA:-未同步（tag 构建/关闭）}\`"
+            echo "- honk：\`${HONK_VERSION:-包内 pinned fallback}\`"
             echo "- 分流内核：**${PROXY}**"
             echo "- 构建：[run ${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo ""
