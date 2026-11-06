@@ -29,19 +29,19 @@ PKG_DIR:=$(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_VERSION:=0.1.0_beta4
+PKG_VERSION:=0.1.0_beta5
 PKG_RELEASE:=1
 PKGARCH:=aarch64_cortex-a53
 
-PKG_SOURCE:=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-stock-full.tar.gz
-PKG_SOURCE_URL:=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.4
-PKG_HASH:=9b2e30d68b3be216ef7c959f6266ee39ff2291be83fb7b60beeb05254f4becc6
+PKG_SOURCE:=honk-core-v0.1.0-beta.5-aarch64-unknown-linux-musl-stock-full.tar.gz
+PKG_SOURCE_URL:=https://github.com/daeuniverse/honk/releases/download/v0.1.0-beta.5
+PKG_HASH:=1a2d9a1c1acff586d6a90ed84963c60f4a711ec3125180db5b4927d26909918b
 
 PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=PonWrt contributors
 
-HONK_EXTRACT_DIR:=honk-core-v0.1.0-beta.4-aarch64-unknown-linux-musl-stock-full
+HONK_EXTRACT_DIR:=honk-core-v0.1.0-beta.5-aarch64-unknown-linux-musl-stock-full
 
 include $(INCLUDE_DIR)/package.mk
 
