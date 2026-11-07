@@ -80,13 +80,20 @@ target/linux/airoha/{an7581,an7583}/config-6.18  KASLR（RANDOMIZE_BASE）
 README-HG5585F.md                     本文件
 ```
 
-**跟进的 ImmortalWrt 更新（2026-11-06）**：
+**跟进的 ImmortalWrt 更新（2026-11-07）**：
 
-- 内核 **6.18.55 → 6.18.60**
-- flowtable 前向路径修复：`706-01`（把 `net_device_path_ctx` 传给 `dev_fill_forward_path`）+ `706-03`（forward path 建不起来就不卸载），替换旧的 `699`
+- `airoha: enable KASLR`：an7581/an7583 开 `CONFIG_RANDOMIZE_BASE` + `RANDOMIZE_MODULE_REGION_FULL`（与内核小版本无关）
 - `706-04`：flowtable 用 VLAN ID 而非完整 TCI（2026-10-30 已选）
 - DSA host FDB 按端口跟踪（2026-10-30 已选）
-- `airoha: enable KASLR`：an7581/an7583 开 `CONFIG_RANDOMIZE_BASE` + `RANDOMIZE_MODULE_REGION_FULL`
+
+**内核 6.18.60：暂缓（本轮保持 6.18.55）**。实测两轮 `.60` 构建都卡在 `kernel-headers` 的补丁阶段：
+
+1. `backport-6.18/438`（spinand QE-bit）Hunk #1 FAILED —— immortalwrt .60 已无此补丁；
+2. 修掉 438 后，`backport-6.18/782`（USB serial Quectel EG060W）Hunk #1/#2 FAILED。
+
+`pending-6.18` 还有 **35 个**与 immortalwrt 有差异的补丁（含 pbs05 自己的 `675` bridge-flowtable 系列），
+`hack/951` BBRv3 也标注 `Base: Linux 6.18.55`。这些要逐个 refresh，或等 pbs05 官方 merge `.60`。
+所以本轮保留 `.55` + 旧的 `pending/699` 前向路径补丁，只把与版本无关的 KASLR 落进来。
 
 **仍不整树 merge**：ImmortalWrt 的 `Merge Official Source` 与 `firewall4` 升级/refresh（本地 firewall4 仍 pin 2025-03-17，会牵动 fullcone 与 bridge-flowtable 补丁）。等 `pbs05/ponwrt` 下一次官方 merge 后再跟。
 
