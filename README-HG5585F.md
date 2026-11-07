@@ -1,7 +1,49 @@
 # PonWrt for FiberHome HG5585F
 
-`pbs05/ponwrt` 的个人 fork，只针对 **烽火 HG5585F（Airoha AN7581，联通 10G-EPON 非对称）** 做收敛和预设。
-上游默认编 12 个机型；这里只编 2 个（CU + CT），默认配置为 **PPPoE 主路由**（不是透明桥）。
+`pbs05/ponwrt` 的个人 fork，只针对 **烽火 HG5585F（Airoha AN7581，联通 10G-EPON 非对称）** 做收敛与预设：
+上游默认编 12 个机型，这里只编 **CU + CT**；默认形态是 **PPPoE 主路由**（不是透明桥）；分流层默认编入 **honk（eBPF）**，可切换 dae / passwall / openclash / none。
+
+---
+
+## 简介
+
+### 这是什么
+
+一台 **烽火 HG5585F 光猫（Airoha AN7581，4×Cortex-A53 + RISC-V NPU + MT7916）** 的自编译、可复现固件。
+底座是 **ImmortalWrt SNAPSHOT（apk）**，PON/AN7581 适配来自 `pbs05/ponwrt`，本仓库只做收敛、预设与增量。
+
+### 内容特点
+
+- **可复现**：honk 预编译版本按 **sha256 钉死**；tag 构建跳过自动同步；产物带 `profiles.json` / `config.buildinfo` / `config.full` / `sha256sums.txt`。
+- **现网参数进镜像**：`uci-defaults` 首启即落 `192.168.31.1`、`pon0.995` PPPoE（`wan.mtu=1500` → 协商 1492）、`wan6` DHCPv6、DHCP/RA、时区/NTP —— 刷完不用手配网络。
+- **带救援镜像**：每个机型除 `sysupgrade.itb` 还产出 `initramfs-recovery.itb`（U-Boot 内存启动）。
+- **调优进镜像**：`packet_steering=2`（绕开 airoha NAPI 名不匹配导致 RPS 全塌 CPU0）、以太网 IRQ 绑核、mt76 NAPI 绑核、16 MB TCP 缓冲 / `backlog=16384` / `tcp_mtu_probing` 等 sysctl、`dnsmasq cachesize=1000`、`zram-swap`、`nf_conntrack_acct/events=0`。
+- **PON 可靠性**：`pon-watchdog` 兜底上游 Issue #42（10G-EPON 冷启动 MPCP 1 Hz 自循环），只拆 WAN、永不自动重启。
+- **自动跟随 + 可回退**：手动构建默认 `sync_upstream=true` + `update_honk=true`（跟随 pbs05 最新与 honk 最新 release）；tag 构建保持可复现。
+
+### 架构上跟别的固件有什么不同
+
+| 维度 | **本仓库（PonWrt）** | QWRT（第三方闭源） | X-WRT / 官方 ImmortalWrt |
+|---|---|---|---|
+| 内核 | **mainline 6.18.x**（AIROHA 补丁集追到 v7.4；honk/dae 变体开 BTF） | 厂商 BSP（5.4.302 → 7.3.1 vendor），闭源 | mainline 6.18 |
+| 转发/卸载 | mainline `net/airoha`：PPE 硬件卸载走 netfilter flowtable；`airoha_ppe` **原生支持 `FLOW_ACTION_PPPOE_PUSH`（1 VLAN + 1 PPPoE）**，路由模式可卸 PPPoE | 厂商 `an7581_bsp_ppe`，**无 PPPoE 封装能力**（QWRT 上"开 flowtable 掉 600M"的根因推断） | 无 PON 适配层 |
+| 包管理 | **apk**（ImmortalWrt SNAPSHOT），签名包/固件 | opkg（公网源已 404） | apk |
+| 分流/代理 | **honk**（eBPF/TC，单内核 + doona 面板 + native API），或 dae / passwall / openclash / none | nikki + mihomo（fake-IP + TPROXY） | 无（需自装） |
+| 无线 | mainline `mt76`（`kmod-mt7915e` + `kmod-mt7916-firmware`），**radio 默认关**（小米 AP 做主无线） | 厂商 `mtwifi` + `mt_whnat` 硬件 NAT | mt76 |
+| 机型 | 只编 `hg5585f-cu` / `hg5585f-ct`（CT 的 lan1 = GPY211C 2.5G） | 仅 CT | 12 机型 / 无 HG5585F |
+| 可维护性 | git + GitHub Actions + kconfig 分层 + 断言 + 校验和 | 闭源、无源码 | 有源码但要自己移植 PON |
+
+**一句话**：区别不是"又一个 OpenWrt 编译"，而是 **mainline 内核 + PON 适配 + mainline PPE（能卸 PPPoE）+ eBPF 代理** 这条组合；QWRT 走的是厂商 BSP + 闭源 WiFi/NPU。
+
+### 软件构成
+
+- **底座**：ImmortalWrt SNAPSHOT（`CONFIG_USE_APK=y`、`CONFIG_SIGNED_PACKAGES` / `SIGN_FIRMWARE=y`），`airoha/an7581` target。
+- **PON**：`kmod-airoha-xpon`、`kmod-airoha-paged-bosa`、`airoha-ponctl`、`airoha-pond`、`luci-app-pon`、`pon-watchdog`；**不含 EN7572 前端**。
+- **网络/路由**：`firewall4` + `nftables`（fullcone、flowtable）、`ppp` / `ppp-mod-pppoe`、`dnsmasq-full`、`odhcpd-ipv6only`、`kmod-nft-tproxy`、`kmod-tun`、`kmod-wireguard`、`kmod-sched-cake`、`kmod-tcp-bbr`、`kmod-nf-conntrack-bridge`。
+- **分流（多选一）**：`honk`（预编译 `honk-core` + 内嵌 doona UI + native API + LuCI 服务页）、`luci-app-honk`、`luci-lib-daeuniverse`；或 `dae` / `passwall` / `openclash` / `none`。
+- **无线**：`kmod-mt7915e`、`kmod-mt7916-firmware`（默认 disabled，随时一行打开）。
+- **运维**：`ethtool-full`、`ip-full`、`nand-utils`、`ubi-utils`、`fitblk`、`tcpdump`、`zram-swap`、`/sbin/tempinfo`（LuCI 温度行）。
+- **明确不装**：UPnP / miniupnpd、`br_netfilter`、samba、EN7572。
 
 ---
 
@@ -23,31 +65,30 @@ Bernardxu123/immortalwrt-hg5585f
 **本仓库相对上游的改动**：
 
 ```
-configs/hg5585f-profile.config        12 个 device → 2 个
-configs/hg5585f-build.config          ccache / 能力锚点 / 去掉 UPnP / zram / PON 栈
-configs/hg5585f-proxy-honk.config     honk beta3 + BTF + doona 面板
+configs/hg5585f-profile.config        12 个 device → 2 个（CU / CT）
+configs/hg5585f-build.config          ccache / 能力锚点 / 去 UPnP / zram / PON 栈
+configs/hg5585f-proxy-{honk,dae,passwall,openclash}.config   分流层（默认 honk）
 files/                                首启注入 + 看门狗 + 绑核/温度服务 + sysctl 调优 + 静态 config + banner
                                       （QWRT 逆向借鉴清单见《QWRT-分析/优化借鉴与落地.md》）
-scripts/hg5585f/                      配置生成 / 断言 / 产物校验 / 本地干跑
-package/honk/                         honk-core 预编译包 + procd init + UCI + 默认配置
-package/vmlinux-btf-builtin/           内核自带 BTF 的 +vmlinux-btf 虚依赖
-package/luci-app-honk/ + luci-lib-daeuniverse/  LuCI 状态/配置编辑页
-target/linux/generic/{backport,pending}-6.18/  ImmortalWrt 2026-10-25 的 flowtable/VLAN/DSA 修复
+scripts/hg5585f/                      配置生成 / 断言 / 产物校验 / 上游与 honk 自动同步
+package/honk/                         honk-core 预编译包 + procd init + UCI + uci-defaults + keep.d
+package/vmlinux-btf-builtin/          内核自带 BTF 的 +vmlinux-btf 虚依赖
+package/luci-app-honk/ + luci-lib-daeuniverse/  LuCI 服务/配置/日志页（启动开关、编辑、日志）
+target/linux/generic/{backport,pending}-6.18/  flowtable 前向路径 / VLAN / DSA 修复
+target/linux/airoha/{an7581,an7583}/config-6.18  KASLR（RANDOMIZE_BASE）
 .github/workflows/build.yml           只编 an7581 + HG5585F 两个 profile
 README-HG5585F.md                     本文件
 ```
 
-**新库基线（2026-10-30）**：本仓库由 `ponwrt-hg5585f` 更名为 `immortalwrt-hg5585f`，
-仍然是 `pbs05/ponwrt` 的 fork（ImmortalWrt master + AN7581/PON 适配）。
-已选入的 ImmortalWrt 更新只包含 3 个新增文件型内核补丁（不整树 merge）：
+**跟进的 ImmortalWrt 更新（2026-11-06）**：
 
-- `be75fbfa9b`：flowtable 使用 VLAN ID 而非完整 TCI
-- `09fe0f8140`：bridge roaming flow 的 flowtable 检查
-- `c7924dcd74`：DSA host FDB 按端口跟踪
+- 内核 **6.18.55 → 6.18.60**
+- flowtable 前向路径修复：`706-01`（把 `net_device_path_ctx` 传给 `dev_fill_forward_path`）+ `706-03`（forward path 建不起来就不卸载），替换旧的 `699`
+- `706-04`：flowtable 用 VLAN ID 而非完整 TCI（2026-10-30 已选）
+- DSA host FDB 按端口跟踪（2026-10-30 已选）
+- `airoha: enable KASLR`：an7581/an7583 开 `CONFIG_RANDOMIZE_BASE` + `RANDOMIZE_MODULE_REGION_FULL`
 
-**暂不取**：ImmortalWrt 2026-10-26 的整树 `Merge Official Source`、`firewall4` 升级/refresh
-（本地 firewall4 仍 pin 2025-03-17，会牵动 fullcone 与 bridge-flowtable 补丁），以及仅影响
-构建自测的 `kselftests-bpf`。等 `pbs05/ponwrt` 下一次官方 merge 后再跟整树更新。
+**仍不整树 merge**：ImmortalWrt 的 `Merge Official Source` 与 `firewall4` 升级/refresh（本地 firewall4 仍 pin 2025-03-17，会牵动 fullcone 与 bridge-flowtable 补丁）。等 `pbs05/ponwrt` 下一次官方 merge 后再跟。
 
 ---
 
@@ -373,9 +414,9 @@ uci commit firewall && /etc/init.d/firewall restart
 由 workflow 的 `proxy` 输入决定，默认 **honk**（eBPF 新内核）。CU 测试机先刷
 `-cu` 镜像验证，CT 主路由验证通过前不要刷：
 
-> 注意：`proxy=honk` 只是把 honk **编进固件**；`honk.config.enabled` 默认是 `0`
-> （出场不启用），首次使用需按下方命令手动启用。未启用 honk 时它不接管流量，
-> 但 `99-hg5585f-setup` 仍按"honk 二进制存在"把 `flow_offloading_hw` 设为 `0`
+> 注意：`proxy=honk` 只是把 honk **编进固件**；honk **出场不启用**（没有 `/etc/rc.d/S99honk`
+> 链接），首次使用需 `/etc/init.d/honk enable && /etc/init.d/honk start`。未启用 honk 时它
+> 不接管流量，但 `99-hg5585f-setup` 仍按"honk 二进制存在"把 `flow_offloading_hw` 设为 `0`
 > （保守值，避免启用后与 eBPF 冲突）。
 
 ```sh
@@ -385,7 +426,7 @@ gh workflow run build-hg5585f --repo Bernardxu123/immortalwrt-hg5585f --ref mast
 
 | proxy | 配置文件 | 取舍 |
 |---|---|---|
-| `honk`（默认） | `configs/hg5585f-proxy-honk.config` | 官方 v0.1.0-beta.3 aarch64 musl stock-full 预编译包；BTF + TCX/eBPF + NFQUEUE；内嵌 doona 面板；仍是 alpha，别直接上主路由 |
+| `honk`（默认） | `configs/hg5585f-proxy-honk.config` | 官方 v0.1.0-beta.5 aarch64 musl stock-full 预编译包（sha256 钉死）；BTF + TCX/eBPF + NFQUEUE；内嵌 doona 面板 + native API + LuCI 服务页；仍是 alpha，别直接上主路由 |
 | `dae` | `configs/hg5585f-proxy-dae.config` | 旧 eBPF 单内核；同样要 BTF；保留作为 A/B 回退 |
 | `passwall` | `configs/hg5585f-proxy-passwall.config` | Xray/SingBox/Hysteria/Simple-Obfs/Geoview；不拉 Rust，约 +30~40 分钟 |
 | `openclash` | `configs/hg5585f-proxy-openclash.config` | Clash 订阅原生；DEPENDS 里有 `+ruby +ruby-yaml`，Ruby 源码编译约 +15~25 分钟，运行内存也更高 |
@@ -401,7 +442,7 @@ honk 包的文件位置：
 - `package/vmlinux-btf-builtin/`：满足 `+vmlinux-btf` 虚依赖（内核自带 BTF）
 - `package/luci-app-honk/` + `package/luci-lib-daeuniverse/`：LuCI 状态/配置编辑页
 - 面板：`http://<LAN-IP>:9090/ui/`（首次打开创建管理员；只放 LAN）
-- 启用：`uci set honk.config.enabled='1'; uci commit honk; /etc/init.d/honk enable; /etc/init.d/honk start`
+- 启用：`/etc/init.d/honk enable && /etc/init.d/honk start`（开机自启跟随 `/etc/rc.d/S99honk` 链接；旧的 `honk.config.enabled` 由 `/etc/uci-defaults/90-honk-autostart` 迁移一次）
 
 nikki（mihomo）不在选项里——它需要额外 feed（`nikkinikki-org/OpenWrt-nikki`），
 本仓库没加。想要更轻的 Clash 方案可以自己加 feed 后照 `openclash` 的写法加一个层。
