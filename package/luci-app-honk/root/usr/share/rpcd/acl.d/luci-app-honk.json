@@ -4,21 +4,26 @@
 		"read": {
 			"file": {
 				"/etc/honk": [ "list" ],
-				"/etc/honk/*": [ "list", "read" ]
+				"/etc/honk/*": [ "list", "read" ],
+				"/usr/libexec/daeuniverse-pkg installed *": [ "exec" ],
+				"/usr/libexec/daeuniverse-pkg check *": [ "exec" ],
+				"/usr/libexec/daeuniverse-pkg status": [ "exec" ]
 			},
 			"ubus": {
-				"file": [ "list", "read" ],
+				"file": [ "list", "read", "exec" ],
 				"log": [ "read" ],
+				"rc": [ "list" ],
 				"service": [ "list" ]
 			},
-			"uci": [ "honk", "dae" ]
+			"uci": [ "honk", "dae", "network" ]
 		},
 		"write": {
 			"file": {
-				"/etc/honk/*": [ "write" ]
+				"/etc/honk/*": [ "write" ],
+				"/usr/libexec/daeuniverse-pkg upgrade *": [ "exec" ]
 			},
 			"ubus": {
-				"file": [ "write" ],
+				"file": [ "write", "exec" ],
 				"rc": [ "init" ]
 			},
 			"uci": [ "honk", "dae" ]

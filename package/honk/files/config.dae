@@ -5,10 +5,10 @@
 # subscriptions are configured. Add a subscription/group and change the routing
 # fallback once the direct-only datapath has been verified.
 #
-# The UCI switch is /etc/config/honk (option enabled '0' by default):
-#   uci set honk.config.enabled='1'
-#   uci commit honk
+# The service is disabled by default. Enable it with:
 #   /etc/init.d/honk enable && /etc/init.d/honk start
+# Starting at boot follows the /etc/rc.d/S*honk link (the old UCI option
+# honk.config.enabled is migrated once by /etc/uci-defaults/90-honk-autostart).
 #
 # doona panel: http://<router-LAN-IP>:9090/ui/ (first visit creates the admin)
 # Keep port 9090 on LAN only; do not expose it to WAN.
@@ -16,7 +16,7 @@
 global {
     wan_interface: auto
     lan_interface: br-lan
-    data_dir: '/etc/honk'
+    data_dir: '/etc/honk/data'
     log_level: info
     # Empty = stdout, procd forwards to syslog/logread.
     log_file: ''

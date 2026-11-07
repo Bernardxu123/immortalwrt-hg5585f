@@ -71,6 +71,27 @@ define Package/honk/conffiles
 /etc/honk/config.dae
 endef
 
+# apk replaces a conffile the user never edited with the packaged one, which has
+# no `enabled` option any more, so the boot setting of earlier versions is saved
+# here for files/honk.uci-defaults to migrate onto the rc.d link.
+define Package/honk/preinst
+#!/bin/sh
+[ -z "$${IPKG_INSTROOT}" ] || exit 0
+enabled="$$(uci -q get honk.config.enabled)"
+[ -z "$$enabled" ] || echo "$$enabled" > /tmp/honk-autostart
+exit 0
+endef
+
+# With apk this runs after default_postinst. The restart picks up a new binary
+# of an enabled service; the init script's package guard keeps a disabled one
+# from starting.
+define Package/honk/postinst
+#!/bin/sh
+[ -z "$${IPKG_INSTROOT}" ] || exit 0
+/etc/init.d/honk enabled && /etc/init.d/honk restart
+exit 0
+endef
+
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(TAR) -xzf $(DL_DIR)/$(PKG_SOURCE) -C $(PKG_BUILD_DIR)
@@ -88,8 +109,12 @@ define Package/honk/install
 	$(INSTALL_BIN) $(PKG_DIR)/files/honk.init $(1)/etc/init.d/honk
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(PKG_DIR)/files/honk.config $(1)/etc/config/honk
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) $(PKG_DIR)/files/honk.uci-defaults $(1)/etc/uci-defaults/90-honk-autostart
 	$(INSTALL_DIR) $(1)/etc/honk
 	$(INSTALL_CONF) $(PKG_DIR)/files/config.dae $(1)/etc/honk/config.dae
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	printf '%s\n' '/etc/honk/data/' > $(1)/lib/upgrade/keep.d/honk
 	$(INSTALL_DIR) $(1)/usr/share/honk
 	$(LN) ../v2ray/geoip.dat $(1)/usr/share/honk/geoip.dat
 	$(LN) ../v2ray/geosite.dat $(1)/usr/share/honk/geosite.dat
