@@ -86,7 +86,7 @@ README-HG5585F.md                     本文件
 - `706-04`：flowtable 用 VLAN ID 而非完整 TCI（2026-10-30 已选）
 - DSA host FDB 按端口跟踪（2026-10-30 已选）
 
-**内核 6.18.60：已采用 pbs05 f6977f2（2026-11-16）**。pbs05 已合并 ImmortalWrt 6.18.60，并刷新 `438`/`782`/`675-*`/`706-*` 等补丁；本地 `58822a2` 的 `.55` 回退不再沿用。同步分支 `sync/ponwrt-20261119` 以 f6977f2 为基底重放 HG5585F overlay；构建后用 `scripts/hg5585f/assert-ppe.sh` 验证 `FLOW_ACTION_PPPOE_PUSH`、`706-04`、内核符号与 NPU 固件。若 `hack/951` BBRv3 仍有 fuzz，单独 refresh，不阻塞 PON/PPE 验证。
+**内核 6.18.60：已采用 pbs05 f6977f2（2026-11-16）**。pbs05 已合并 ImmortalWrt 6.18.60，并带入 `675-*`/`706-*` 等 flowtable 补丁；`438`/`782` 是否仍有 fuzz 以首次 CI 构建为准（本地未编译）。本地 `58822a2` 的 `.55` 回退不再沿用。同步分支 `sync/ponwrt-20261119` 以 f6977f2 为基底重放 HG5585F overlay；构建后用 `scripts/hg5585f/assert-ppe.sh` 验证 `FLOW_ACTION_PPPOE_PUSH`、`706-04`、内核符号与 NPU 固件。若 `hack/951` BBRv3 仍有 fuzz，单独 refresh，不阻塞 PON/PPE 验证。
 
 **同步策略**：改为“pbs05 f6977f2 基底 + HG5585F overlay 重放”，不再把旧 master 整树 merge 到新基底；这样不会让 `58822a2` 的 6.18.60 回退和 `706-01/03` 删除反向覆盖上游补丁。
 
