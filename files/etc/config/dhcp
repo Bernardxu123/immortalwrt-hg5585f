@@ -1,0 +1,57 @@
+# HG5585F 主路由模式 DHCP / DNS 配置
+#
+# 角色：HG5585F = PPPoE 主路由，br-lan = lan1..4，LAN 192.168.31.0/24
+# 下游：小米 BE6500 Pro 继续做 AP；平板/PC 走 DHCP。
+#
+# 静态租约请刷完后在 LuCI / uci 里按需添加：
+#   不要把家里的设备 MAC 提交到公开仓库。
+
+config dnsmasq
+	option domainneeded '1'
+	option boguspriv '1'
+	option filterwin2k '0'
+	option localise_queries '1'
+	option rebind_protection '1'
+	option rebind_localhost '1'
+	option local '/lan/'
+	option domain 'lan'
+	option expandhosts '1'
+	option nonegcache '1'
+	option authoritative '1'
+	option readethers '1'
+	option leasefile '/tmp/dhcp.leases'
+	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+	option nonwildcard '1'
+	option localservice '1'
+	option ednspacket_max '1232'
+	# DNS 缓存 1000 条（QWRT 同款；《QWRT-分析/优化借鉴与落地.md》§2 #3。
+	# 注意：若日后换 OpenClash fake-ip 模式需改回 0，fake-ip 下缓存无意义）
+	option cachesize '1000'
+	option filter_aaaa '0'
+	option filter_a '0'
+
+config dhcp 'lan'
+	option interface 'lan'
+	option start '100'
+	option limit '150'
+	option leasetime '12h'
+	option ignore '0'
+	option dhcpv4 'server'
+	option dhcpv6 'server'
+	option ra 'server'
+	option ndp 'disabled'
+	option ra_slaac '1'
+	list ra_flags 'managed-config'
+	list ra_flags 'other-config'
+
+config dhcp 'wan'
+	option interface 'wan'
+	option ignore '1'
+
+config odhcpd 'odhcpd'
+	option maindhcp '0'
+	option leasefile '/tmp/odhcpd.leases'
+	option leasetrigger '/usr/sbin/odhcpd-update'
+	option loglevel '4'
+	option piodir '/tmp/odhcpd-piodir'
+	option hostsdir '/tmp/hosts'

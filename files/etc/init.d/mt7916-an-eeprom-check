@@ -1,0 +1,51 @@
+#!/bin/sh /etc/rc.common
+# Read-only MT7916 EEPROM check for HG5585F.
+#
+# Layout (confirmed from the stock QWRT hotplug script and l1profile.dat):
+#   UBI volume "factory", offset 0x1000, 4 KiB, first two bytes 0x16 0x79.
+#   The same layout is exposed by the DT nvmem cell wifi_eeprom (eeprom@1000).
+#
+# This script only READS the factory volume. It never writes mtd/UBI, never
+# touches the fit/fip/ubootenv volumes, and always returns 0, so it cannot
+# affect U-Boot, sysupgrade, or the boot chain. Its only purpose is to make a
+# missing/invalid EEPROM visible in logread instead of a silent WiFi failure.
+
+START=09
+
+start() {
+	. /lib/functions.sh
+	. /lib/upgrade/nand.sh
+
+	case "$(board_name)" in
+		fiberhome,hg5585f-ct|fiberhome,hg5585f-cu) ;;
+		*) return 0 ;;
+	esac
+
+	local ubidev volume calfile magic
+	ubidev=$(nand_find_ubi ubi) || true
+	if [ -z "$ubidev" ]; then
+		logger -t mt7916-eeprom "factory volume: UBI device not found"
+		return 0
+	fi
+	volume=$(nand_find_volume "$ubidev" factory) || true
+	if [ -z "$volume" ]; then
+		logger -t mt7916-eeprom "factory volume not found"
+		return 0
+	fi
+
+	calfile=$(mktemp /tmp/mt7916-eeprom.XXXXXX) || return 0
+	if dd if="/dev/$volume" of="$calfile" bs=4096 skip=1 count=1 2>/dev/null &&
+	   [ "$(wc -c < "$calfile" 2>/dev/null)" -eq 4096 ]; then
+		magic=$(hexdump -v -n 2 -e '1/1 "%02x"' "$calfile" 2>/dev/null)
+		[ -n "$magic" ] || magic=$(od -An -tx1 -N2 "$calfile" 2>/dev/null | tr -d ' \n')
+		if [ "$magic" = "1679" ]; then
+			logger -t mt7916-eeprom "factory EEPROM OK (4 KiB, magic 0x1679)"
+		else
+			logger -t mt7916-eeprom "factory EEPROM invalid (magic=$magic, expected 1679); WiFi calibration will fail"
+		fi
+	else
+		logger -t mt7916-eeprom "factory EEPROM read failed"
+	fi
+	rm -f "$calfile"
+	return 0
+}

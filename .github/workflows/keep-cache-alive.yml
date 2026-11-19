@@ -1,0 +1,79 @@
+name: keep-cache-alive
+
+# actions/cache 的条目 **7 天不访问就会被回收**。
+# 这个 workflow 每 5 天做一次 lookup-only 的 restore（只查不下载，几秒完成），
+# 尽量让工具链缓存与 dl 缓存活下来，避免"隔两周再编就退回冷启动"。
+#
+# 说明（诚实版）：
+#   * 工具链缓存的 key 是可精确计算的（tools/ + toolchain/ 的 Makefile 哈希），
+#     所以这里能精确命中并刷新它 —— 这是主要目标。
+#   * dl / cc 的 key 含周号，本 workflow 无法预知"下次构建会用哪个周号"，
+#     只能用前缀 restore-keys 尝试命中最近的条目，属于 best-effort。
+#   * 即使全部失效也不会出错：工具链另有 Release 资产备份（tag `toolchain-cache`），
+#     dl 重新下载约 10 分钟。最坏情况只是慢一点。
+
+on:
+  schedule:
+    - cron: '0 20 */5 * *'   # 每 5 天 UTC 20:00（北京时间次日 04:00）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: 检出源码（为了算工具链缓存 key）
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: 计算工具链缓存 key
+        id: tc
+        run: |
+          # 与 build.yml 的「计算工具链缓存 key」保持一致：
+          # TARGET/SUBTARGET 固定为 airoha/an7581（本仓库只编这一个 subtarget）
+          TOOLS_HASH=$(find tools toolchain -type f \( -name "Makefile" -o -name "*.mk" \) \
+                       -exec md5sum {} + 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+          KEY="ponwrt-toolchain-airoha-an7581-${TOOLS_HASH:0:16}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "工具链缓存 key：$KEY"
+
+      - name: Touch 工具链缓存
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: /tmp/dummy
+          key: ${{ steps.tc.outputs.key }}
+          lookup-only: true
+
+      - name: Touch dl 缓存（best-effort）
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: /tmp/dummy
+          key: dl-${{ github.run_id }}
+          restore-keys: |
+            dl-
+          lookup-only: true
+
+      - name: Touch ccache 缓存（best-effort）
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: /tmp/dummy
+          key: cc-${{ github.run_id }}
+          restore-keys: |
+            cc-
+          lookup-only: true
+
+      - name: 汇总
+        run: |
+          echo "工具链命中: ${{ steps.tc.outputs.key != '' && '已尝试' || '无 key' }}"
+          gh api "repos/${{ github.repository }}/actions/caches" \
+            --jq '.actions_caches[] | "\(.key)  \(.size_in_bytes/1048576|floor) MB  last_access=\(.last_accessed_at)"' \
+            2>/dev/null | head -10 || echo "(无法列出缓存)"
+        env:
+          GH_TOKEN: ${{ github.token }}

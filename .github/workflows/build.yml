@@ -1,0 +1,660 @@
+name: build-hg5585f
+
+# 只编 FiberHome HG5585F 的 CT + CU 两个 profile（上游默认 12 个）。
+# 产物：fiberhome_hg5585f-{cu,ct} 的 sysupgrade.itb + recovery.itb。
+#
+# 触发方式：
+#   * 手动 workflow_dispatch（推荐：先看 master 上的改动再决定编不编）
+#   * push tag v*（打 tag 才出"正式"固件——master 随时可能跟到上游半成品状态）
+#
+# ── 性能设计（2026-10-18 改造，参考 qwe-qaq/Actions-OpenWrt-AN758X）────────────
+# 实测基线：编译 3h02m49s / 总 3h13m，即 94% 的时间在编译，其余 20 步只有 11 分钟。
+# 所以唯一有效的优化是工具链缓存：
+#   1) staging_dir/host* + staging_dir/tool* 用 actions/cache 缓存，
+#      key = tools/ + toolchain/ 所有 Makefile 的 md5（源码不变就一直命中）
+#   2) actions/cache miss 时回退到 Release 资产（tag `toolchain-cache`），
+#      绕开单仓库 10 GB 缓存配额
+#   3) ccache 作为第二杠杆叠加，但必须处理它和工具链缓存的冲突（见下方 Setup ccache）
+# 预期：3h02m → 2h 以内；再叠 ccache 命中 → 1h30m~1h50m
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy:
+        description: '分流内核（honk=eBPF 新内核，默认；dae=旧 eBPF；passwall/openclash=传统；none=不含代理）'
+        type: choice
+        options:
+          - honk
+          - dae
+          - passwall
+          - openclash
+          - none
+        default: honk
+      build_recovery:
+        description: '同时产出 recovery.itb（initramfs 救援镜像，约多 10-16 分钟）'
+        type: boolean
+        default: true
+      make_release:
+        description: '把产物发布为 GitHub Release'
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release 标签（留空 = tag 触发用 ref 名，手动触发用 v<日期>-<短SHA>）'
+        type: string
+        default: ''
+      sync_upstream:
+        description: '构建前 merge pbs05/ponwrt master 最新（冲突会让构建失败；tag 构建始终跳过）'
+        type: boolean
+        default: true
+      update_honk:
+        description: '构建前拉 daeuniverse/honk 最新 release（含 beta；tag 构建始终跳过）'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-hg5585f-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: an7581 / HG5585F CT+CU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      # ---------------------------------------------------------------------
+      # 这个仓库本身就是完整的 ponwrt（fork），所以 checkout 就是取源码树
+      # ---------------------------------------------------------------------
+      - name: 检出源码
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 记录版本信息 / 周号
+        id: meta
+        run: |
+          git log -1 --format='%H %ad %s' --date=iso
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          # 缓存 key 用「年+周」而不是 run_id：用 run_id 每次运行都会 save 一份新副本，
+          # 10 GB 配额很快被刷满，反而把真正有用的旧缓存淘汰掉。
+          echo "week=$(date +%Y%W)" >> "$GITHUB_OUTPUT"
+          echo "缓存周号：$(date +%Y%W)"
+
+      # ---------------------------------------------------------------------
+      # 磁盘：ubuntu-24.04 runner 的 / 清理后约 20-29 GB，an7581 全量编译实测 15-22 GB。
+      # 三层防御：清理 → 切 /mnt 大盘 → 28 GB 硬闸门
+      # ---------------------------------------------------------------------
+      - name: 清理磁盘
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+                      /usr/lib/jvm /usr/local/.ghcup /opt/az
+          sudo apt-get purge -y '^dotnet-.*' '^llvm-.*' '^php.*' '^mongodb-.*' '^mysql-.*' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean
+          docker image prune -af 2>/dev/null || true
+          sudo swapoff -a || true
+          df -h /
+
+      - name: 选择构建目录（优先 /mnt 大盘）
+        run: |
+          mnt_avail=0
+          [ -d /mnt ] && mnt_avail=$(df -Pk /mnt | awk 'NR==2{print $4}')
+          if [ "${mnt_avail:-0}" -gt 40000000 ]; then
+            sudo mkdir -p /mnt/build
+            sudo chown -R "$(id -u):$(id -g)" /mnt/build
+            rsync -a "$GITHUB_WORKSPACE"/ /mnt/build/
+            echo "SRC=/mnt/build" >> "$GITHUB_ENV"
+            echo "构建目录：/mnt/build（$(df -h /mnt | awk 'NR==2{print $4}') 可用）"
+          else
+            echo "SRC=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+            echo "构建目录：workspace（$(df -h "$GITHUB_WORKSPACE" | awk 'NR==2{print $4}') 可用）"
+          fi
+
+      - name: 磁盘闸门
+        run: |
+          avail=$(df -Pk "$SRC" | awk 'NR==2{print $4}')
+          gb=$((avail / 1024 / 1024))
+          echo "可用空间：${gb} GB"
+          if [ "$avail" -lt 28000000 ]; then
+            echo "::error::可用空间只有 ${gb} GB，OpenWrt 全量编译需要 20-25 GB，提前终止"
+            exit 1
+          fi
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint bc binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler dos2unix \
+            dwarves file flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd xz-utils zip zlib1g-dev zstd
+
+      # ---------------------------------------------------------------------
+      # pahole 断言：把 BTF 的「静默失败」变成「响亮失败」
+      #
+      # 内核 CONFIG_DEBUG_INFO_BTF 有两条硬依赖（内核 lib/Kconfig.debug）：
+      #   depends on PAHOLE_VERSION >= 116
+      #   depends on DEBUG_INFO_DWARF4 || PAHOLE_VERSION >= 121
+      # pahole 不满足时，kconfig 会**静默**把 DEBUG_INFO_BTF 丢成 not set：
+      # 编译照样绿灯，产物没有 .BTF，dae/honk 启动时才炸（本项目已踩两次）。
+      # 本步骤只验证宿主机 pahole 可用且 >= 116（BTF 的底线要求）。
+      # ---------------------------------------------------------------------
+      - name: 断言 pahole 可用（BTF 前置）
+        run: |
+          if ! command -v pahole >/dev/null 2>&1; then
+            echo "::error::pahole 不可用。CONFIG_DEBUG_INFO_BTF 会被 kconfig 静默丢弃，"
+            echo "::error::结果是：编译绿灯、镜像无 .BTF、dae/honk 启动即 FATAL。请把 dwarves 加回 apt 列表。"
+            exit 1
+          fi
+          ver_raw=$(pahole --version 2>&1 | head -1)
+          echo "pahole: ${ver_raw}"
+          # 输出形如 "v1.25"。按 major*100+minor 归一化后比较，
+          # 避免 "1.25"→"125" 这种字符串拼接在 2.x 上算错（2.1 会变成 "21" < 116）。
+          major=$(echo "$ver_raw" | sed -n 's/^v\{0,1\}\([0-9]\+\)\..*/\1/p')
+          minor=$(echo "$ver_raw" | sed -n 's/^v\{0,1\}[0-9]\+\.\([0-9]\+\).*/\1/p')
+          if [ -z "$major" ] || [ -z "$minor" ]; then
+            echo "::error::无法解析 pahole 版本号：${ver_raw}"
+            exit 1
+          fi
+          ver=$(( major * 100 + minor ))
+          if [ "$ver" -lt 116 ]; then
+            echo "::error::pahole 版本过低（需要 >= 1.16，当前：${ver_raw}）"
+            echo "::error::BTF 会被 kconfig 静默丢弃，构建虽然绿灯但 dae/honk 无法启动。"
+            exit 1
+          fi
+          echo "OK: pahole ${major}.${minor} >= 1.16，满足 CONFIG_DEBUG_INFO_BTF 底线"
+
+      # ---------------------------------------------------------------------
+      # dl 缓存：源码包。key 用周号，同一周内复用同一条目。
+      # ---------------------------------------------------------------------
+      - name: 恢复 dl 缓存
+        id: dl-cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.SRC }}/dl
+          key: dl-${{ steps.meta.outputs.week }}
+          restore-keys: |
+            dl-
+
+      - name: 恢复 ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.SRC }}/.ccache
+          key: cc-${{ steps.meta.outputs.week }}
+          restore-keys: |
+            cc-
+
+      - name: 初始化 ccache
+        run: |
+          export CCACHE_DIR="$SRC/.ccache"
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 4G
+          ccache --set-config=compression=true || true
+          ccache -s
+
+      # ---------------------------------------------------------------------
+      # 上游/软件自动跟随（仅 workflow_dispatch；tag 构建跳过，保证可复现）
+      # ---------------------------------------------------------------------
+      - name: 同步 pbs05/ponwrt 上游
+        if: inputs.sync_upstream
+        working-directory: ${{ env.SRC }}
+        run: sh scripts/hg5585f/sync-upstream.sh
+
+      # ---------------------------------------------------------------------
+      # feeds：两个私有 feed（pon_drivers / pon_userspace）是 PON 功能的前提
+      # ---------------------------------------------------------------------
+      - name: 更新 feeds
+        working-directory: ${{ env.SRC }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 检查 overlay 是否就位
+        working-directory: ${{ env.SRC }}
+        run: |
+          for f in files/etc/uci-defaults/99-hg5585f-setup \
+                   files/etc/init.d/pon-watchdog \
+                   files/usr/sbin/pon-watchdog \
+                   files/etc/config/pon \
+                   files/etc/config/dhcp \
+                   configs/hg5585f-profile.config \
+                   configs/hg5585f-build.config \
+                   configs/hg5585f-proxy-honk.config \
+                   package/honk/Makefile \
+                   package/honk/files/config.dae \
+                   package/honk/files/honk.init \
+                   package/vmlinux-btf-builtin/Makefile; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少 $f"
+              exit 1
+            fi
+          done
+          echo "overlay 文件齐全"
+
+      - name: 更新 honk 到最新 release
+        if: inputs.update_honk
+        working-directory: ${{ env.SRC }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/hg5585f/update-honk.py
+
+      - name: 生成 .config（含断言）
+        working-directory: ${{ env.SRC }}
+        run: |
+          if [ "${{ inputs.build_recovery }}" = "false" ]; then
+            export ALLOW_NO_INITRAMFS=1
+          fi
+          export PROXY="${{ inputs.proxy }}"
+          echo "分流层：${PROXY:-honk}（空值 = tag 触发，走 honk）"
+          sh scripts/hg5585f/gen-config.sh
+
+      # ---------------------------------------------------------------------
+      # 工具链缓存 key：tools/ + toolchain/ 的所有 Makefile 哈希。
+      # 源码不变 → key 不变 → 一直命中；上游动工具链 → key 变 → 自动重建。
+      # ---------------------------------------------------------------------
+      - name: 计算工具链缓存 key
+        id: tc
+        working-directory: ${{ env.SRC }}
+        run: |
+          TARGET=$(grep '^CONFIG_TARGET_BOARD=' .config | cut -d'"' -f2)
+          SUBTARGET=$(grep '^CONFIG_TARGET_SUBTARGET=' .config | cut -d'"' -f2)
+          TOOLS_HASH=$(find tools toolchain -type f \( -name "Makefile" -o -name "*.mk" \) \
+                       -exec md5sum {} + 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+          KEY="ponwrt-toolchain-${TARGET}-${SUBTARGET}-${TOOLS_HASH:0:16}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "prefix=ponwrt-toolchain-${TARGET}-${SUBTARGET}" >> "$GITHUB_OUTPUT"
+          echo "工具链缓存 key：$KEY"
+
+      - name: 恢复工具链（actions/cache）
+        id: tc-restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: |
+            ${{ env.SRC }}/staging_dir/host*
+            ${{ env.SRC }}/staging_dir/tool*
+          key: ${{ steps.tc.outputs.key }}
+
+      # actions/cache 有 10 GB 单仓库配额，工具链很容易被挤掉；
+      # 用 Release 资产做第二份备份（Release 资产不过期）。
+      - name: 恢复工具链（Release 备份）
+        id: tc-release
+        if: steps.tc-restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.SRC }}
+        run: |
+          echo "restored=false" >> "$GITHUB_OUTPUT"
+          if ! gh release view toolchain-cache >/dev/null 2>&1; then
+            echo "toolchain-cache Release 不存在（首次构建）"
+            exit 0
+          fi
+          ASSET="${{ steps.tc.outputs.key }}.tzst"
+          if gh release view toolchain-cache --json assets -q '.assets[].name' \
+               2>/dev/null | grep -qx "$ASSET"; then
+            echo "从 Release 下载工具链：$ASSET"
+            gh release download toolchain-cache -p "$ASSET" -D .
+            tar -I unzstd -xf "$ASSET" || tar -xf "$ASSET"
+            rm -f "$ASSET"
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release 里没有匹配 $ASSET 的资产"
+          fi
+
+      - name: 下载工具链源码
+        working-directory: ${{ env.SRC }}
+        run: |
+          # make toolchain/install 不会自动补下载，只会去解压 dl/ 里已有的包，
+          # 报错是 "Can't open dl/musl-*.tar.gz"。必须先显式 download。
+          for i in 1 2 3; do
+            echo "===== 第 $i 次尝试：tools/toolchain download ====="
+            if make tools/download toolchain/download -j8; then
+              echo "下载完成"
+              break
+            fi
+            echo "::warning::第 $i 次下载失败，5 秒后重试"
+            sleep 5
+          done
+          # 下载中断会在 dl/ 顶层留下半截包，解压时报 "does not look like a tar archive"
+          # ⚠ 必须 -maxdepth 1：dl/go-mod-cache/ 里有上千个 <1KB 的 Go 模块元数据
+          #   （.mod / .info / .ziphash / list），递归删除会把模块图打散，
+          #   表现为 "no required module provides package X/internal/Y"
+          find dl -maxdepth 1 -size -1024c -type f -exec ls -l {} \; 2>/dev/null
+          find dl -maxdepth 1 -size -1024c -type f -delete 2>/dev/null
+          MISS=""
+          for pat in "musl-*.tar.gz" "gcc-*" "binutils-*"; do
+            ls dl/$pat >/dev/null 2>&1 || MISS="$MISS $pat"
+          done
+          if [ -n "$MISS" ]; then
+            echo "::error::工具链源码缺失:$MISS"
+            exit 1
+          fi
+          echo "工具链源码校验通过，dl 共 $(ls -1 dl | wc -l) 个文件"
+
+      - name: 处理工具链
+        id: toolchain
+        working-directory: ${{ env.SRC }}
+        run: |
+          CACHE_HIT="${{ steps.tc-restore.outputs.cache-hit }}"
+          RELEASE_HIT="${{ steps.tc-release.outputs.restored }}"
+
+          # 缓存可能是坏的/不完整的（比如打包时 staging_dir 还没写完）。
+          # 恢复后先验一下关键产物在不在，不在就当 miss 重编 ——
+          # 否则会在 2 小时后以 "xxx-gcc: not found" 之类的怪错失败。
+          verify_toolchain() {
+            ls staging_dir/toolchain-*/bin/*-openwrt-linux-*-gcc >/dev/null 2>&1 || return 1
+            [ -x staging_dir/host/bin/pkg-config ] || return 1
+            [ -x staging_dir/host/bin/sed ] || return 1
+            return 0
+          }
+
+          if [ "$CACHE_HIT" = "true" ] || [ "$RELEASE_HIT" = "true" ]; then
+            if verify_toolchain; then
+              echo "工具链完整性校验通过"
+            else
+              echo "::warning::工具链缓存不完整（缺 gcc / pkg-config / sed），按 miss 处理并重编"
+              CACHE_HIT=""
+              RELEASE_HIT=""
+            fi
+          fi
+
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "actions/cache 命中，跳过工具链编译"
+            echo "need_save_cache=false" >> "$GITHUB_OUTPUT"
+            echo "need_save_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE_HIT" = "true" ]; then
+            echo "Release 备份命中，跳过工具链编译并回写 actions/cache"
+            echo "need_save_cache=true" >> "$GITHUB_OUTPUT"
+            echo "need_save_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "无可用缓存，开始编译工具链（约 40-70 分钟）"
+            start=$(date +%s)
+            make tools/install -j"$(nproc)" || make tools/install -j1 V=s || { echo "::error::tools 编译失败"; exit 1; }
+            make toolchain/install -j"$(nproc)" || make toolchain/install -j1 V=s || { echo "::error::toolchain 编译失败"; exit 1; }
+            echo "工具链编译完成，耗时 $(( ($(date +%s) - start) / 60 )) 分钟"
+            echo "need_save_cache=true" >> "$GITHUB_OUTPUT"
+            echo "need_save_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # 让后续 make 跳过工具链重编：touch stamp 而不是改 Makefile（改 Makefile 会被上游缩进变化搞坏）
+          touch toolchain/stamp-compile tools/stamp-compile 2>/dev/null || true
+
+      # ---------------------------------------------------------------------
+      # ccache 与工具链缓存的冲突（一定会踩，必须兜底）
+      #
+      # tools/Makefile: ifneq ($(CONFIG_CCACHE)$(CONFIG_SDK),) → 才编 tools/ccache
+      # 若工具链缓存是「未开 ccache」时建立的，命中后跳过 make tools/install，
+      # staging_dir/host/bin/ccache 就不存在，而 rules.mk 的 TARGET_CC := ccache $(TARGET_CC)
+      # 仍会调它 → .../bin/ccache: not found (Error 127)，整个构建失败。
+      # 处理：缺二进制就单独补装；补装失败就关掉 ccache 继续编，绝不让 ccache 拖死构建。
+      # ---------------------------------------------------------------------
+      - name: Setup ccache
+        working-directory: ${{ env.SRC }}
+        run: |
+          if [ -x staging_dir/host/bin/ccache ]; then
+            echo "ccache 二进制已在工具链缓存里：$(staging_dir/host/bin/ccache --version | head -1)"
+            exit 0
+          fi
+          echo "工具链缓存里没有 ccache，补装 tools/ccache ..."
+          if make tools/ccache/install -j"$(nproc)"; then
+            echo "补装成功"
+            exit 0
+          fi
+          echo "::warning::tools/ccache 补装失败，关闭 CONFIG_CCACHE 继续编译"
+          # 只改 .config，不重跑 defconfig —— 重复 defconfig 可能把机型层里
+          # 显式写死的选择重新展开掉。rules.mk 是直接读 .config 的，改一行就够。
+          sed -i 's/^CONFIG_CCACHE=y/# CONFIG_CCACHE is not set/' .config
+          grep -q '^CONFIG_CCACHE=y' .config && echo "::error::ccache 仍为 y，可能再次 Error 127"
+
+      - name: 保存工具链到 actions/cache
+        if: steps.toolchain.outputs.need_save_cache == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.SRC }}/staging_dir/host*
+            ${{ env.SRC }}/staging_dir/tool*
+          key: ${{ steps.tc.outputs.key }}
+
+      - name: 保存工具链到 Release 备份
+        if: steps.toolchain.outputs.need_save_release == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.SRC }}
+        run: |
+          KEY="${{ steps.tc.outputs.key }}"
+          PREFIX="${{ steps.tc.outputs.prefix }}"
+          tar -I zstdmt -cf "${KEY}.tzst" staging_dir/host* staging_dir/tool*
+          ls -lh "${KEY}.tzst"
+
+          gh release view toolchain-cache >/dev/null 2>&1 || \
+            gh release create toolchain-cache \
+              --title "⚠ 工具链缓存（勿删）" \
+              --notes "CI 自动维护的工具链缓存，用于跳过每次 40-70 分钟的工具链编译。删除后下次构建会变慢，但不会出错。" \
+              --latest=false --prerelease
+
+          gh release view toolchain-cache --json assets -q '.assets[].name' 2>/dev/null \
+            | grep "^${PREFIX}" | while read -r old; do
+                gh release delete-asset toolchain-cache "$old" -y 2>/dev/null || true
+              done
+          gh release upload toolchain-cache "${KEY}.tzst" --clobber
+          rm -f "${KEY}.tzst"
+
+      # ---------------------------------------------------------------------
+      # 下载软件包：3 次重试 + 清理半截包
+      # ---------------------------------------------------------------------
+      - name: 下载源码包
+        working-directory: ${{ env.SRC }}
+        run: |
+          for i in 1 2 3; do
+            echo "===== 第 $i 次尝试：make download ====="
+            if make download -j8; then break; fi
+            echo "::warning::第 $i 次下载失败，5 秒后重试"
+            sleep 5
+          done
+          # ⚠ -maxdepth 1：绝不能递归删，会毁掉 dl/go-mod-cache 里的 Go 模块元数据
+          find dl -maxdepth 1 -size -1024c -type f -exec ls -l {} \; 2>/dev/null
+          find dl -maxdepth 1 -size -1024c -type f -delete 2>/dev/null
+          echo "dl 共 $(ls -1 dl | wc -l) 个文件"
+
+      - name: 编译
+        working-directory: ${{ env.SRC }}
+        shell: bash
+        run: |
+          set -o pipefail
+          # 每个 cc1 约 1.5-2 GB RSS；按可用内存算并发，避免 OOM killer 杀掉 cc1
+          # （OOM 的报错是 "Killed"，很难看出是并发太高）
+          JOBS=$(awk -v p="$(nproc)" '/^MemAvailable:/{m=int($2/2097152)+1} END{print (m<p?m:p)}' /proc/meminfo)
+          JOBS=$(( JOBS < 1 ? 1 : JOBS ))
+          echo "并行度：-j$JOBS（nproc=$(nproc)，MemAvailable=$(awk '/^MemAvailable:/{print int($2/1024)" MiB"}' /proc/meminfo)）"
+          start=$(date +%s)
+          if make -j"$JOBS" 2>&1 | tee build.log; then
+            echo "编译成功，耗时 $(( ($(date +%s) - start) / 60 )) 分钟"
+          elif make -j1 2>&1 | tee -a build.log; then
+            echo "单线程编译成功，耗时 $(( ($(date +%s) - start) / 60 )) 分钟"
+          else
+            echo "::error::编译失败，用 -j1 V=s 重跑以拿到可读报错"
+            make -j1 V=s 2>&1 | tee -a build.log || true
+            exit 1
+          fi
+          CCACHE_DIR="$SRC/.ccache" ccache -s || true
+
+      # ---------------------------------------------------------------------
+      # .BTF 段断言（PROXY=dae|honk）：确认内核真的带 BTF 出去
+      #
+      # pahole 断言只保证「宿主机有能力」，不保证「kconfig 真的把 BTF 编进去了」。
+      # 内核 DEBUG_INFO_BTF 还有 depends on KERNEL_DEBUG_INFO && !KERNEL_DEBUG_INFO_REDUCED，
+      # 任何一条不满足都会被静默丢弃。所以这里直接读产物：
+      # 没有 .BTF 段 = dae/honk 启动必 FATAL（BpfLoopFeatureVersion 硬门槛之外的另一道）。
+      #
+      # 必须查未 strip 的 vmlinux（$(LINUX_DIR)/vmlinux）。
+      # $(KERNEL_BUILD_DIR)/vmlinux.elf 是 objcopy -S 之后的，.BTF 可能已被剥掉。
+      # ---------------------------------------------------------------------
+      - name: 断言内核镜像含 .BTF 段（dae/honk）
+        # 空值 = tag 触发，默认走 honk，也必须断言 BTF；
+        # passwall/openclash/none 不需要 BTF。
+        if: inputs.proxy != 'passwall' && inputs.proxy != 'openclash' && inputs.proxy != 'none'
+        working-directory: ${{ env.SRC }}
+        run: |
+          # 路径深度必须算准，否则这一步会在 3 小时后假失败：
+          #   build_dir/target-aarch64_cortex-a53_musl/linux-airoha_an7581/linux-<ver>/vmlinux
+          #   = build_dir(0) → target…(1) → linux-airoha_an7581(2) → linux-<ver>(3) → vmlinux(4)
+          # 但 LINUX_VERSION 可能带额外一级（如 linux-6.18.55），且 -path 是整段匹配，
+          # 故给足 maxdepth 6，并用宽松的 */linux-*/linux-*/vmlinux 模式，不写死 subtarget。
+          vmlinux=$(find build_dir -maxdepth 6 -type f -path '*/linux-*/linux-*/vmlinux' 2>/dev/null | head -1)
+          if [ -z "$vmlinux" ]; then
+            echo "::error::找不到未 strip 的 vmlinux（期望 build_dir/*/linux-*/linux-*/vmlinux）"
+            echo "::error::编译可能提前失败，或内核目录命名变了。以下是所有名为 vmlinux 的产物："
+            find build_dir -maxdepth 8 -type f -name vmlinux 2>/dev/null | head -20
+            exit 1
+          fi
+          echo "检查：$vmlinux（$(du -h "$vmlinux" | cut -f1)）"
+          if ! command -v readelf >/dev/null 2>&1; then
+            echo "::error::readelf 不可用（binutils 缺失？）"
+            exit 1
+          fi
+          if readelf -S "$vmlinux" | grep -q '\.BTF'; then
+            echo "OK: 内核含 .BTF 段"
+            readelf -S "$vmlinux" | grep -A1 '\.BTF' | head -4
+          else
+            echo "::error::内核镜像缺少 .BTF 段！"
+            echo "::error::dae/honk 启动会 FATAL（无法加载 eBPF）。排查顺序："
+            echo "::error::  1) pahole --version >= 1.16（上一步已断言，应已通过）"
+            echo "::error::  2) CONFIG_KERNEL_DEBUG_INFO=y 且 !CONFIG_KERNEL_DEBUG_INFO_REDUCED"
+            echo "::error::  3) CONFIG_KERNEL_DEBUG_INFO_BTF=y 是否被 kconfig 丢弃"
+            echo "::error::可用下面命令看实际生效值："
+            echo "::error::  grep -E 'DEBUG_INFO' build_dir/*/linux-airoha_an7581*/linux-*/.config"
+            exit 1
+          fi
+
+      # actions/cache 的 Post 保存在 job 失败时会跳过；改用显式 save，失败也保住
+      - name: 保存 dl 缓存（失败也保存）
+        if: always() && steps.dl-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SRC }}/dl
+          key: dl-${{ steps.meta.outputs.week }}
+
+      - name: 保存 ccache（失败也保存）
+        if: always() && steps.ccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SRC }}/.ccache
+          key: cc-${{ steps.meta.outputs.week }}
+
+      - name: 收集并校验产物
+        working-directory: ${{ env.SRC }}
+        run: sh scripts/hg5585f/collect-artifacts.sh "$SRC" "$RUNNER_TEMP/out"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: hg5585f-${{ env.COMMIT }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/out/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 上传诊断信息（失败时）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ env.COMMIT }}-${{ github.run_number }}
+          path: |
+            ${{ env.SRC }}/.config
+            ${{ env.SRC }}/build.log
+            ${{ env.SRC }}/bin/targets/airoha/an7581/profiles.json
+            ${{ env.SRC }}/bin/targets/airoha/an7581/config.buildinfo
+            ${{ env.SRC }}/logs/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------
+      # 发布 Release
+      # 标签优先级：release_tag 输入 > tag 触发的 ref 名 > v<日期>-<短SHA>
+      # ---------------------------------------------------------------------
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.make_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+              TAG="${GITHUB_REF#refs/tags/}"
+            else
+              TAG="v$(date +%Y.%m.%d)-${{ env.COMMIT }}"
+            fi
+          fi
+          echo "发布标签：$TAG"
+
+          PROXY="${{ inputs.proxy }}"; PROXY="${PROXY:-honk}"
+          {
+            echo "PonWrt for FiberHome HG5585F（Airoha AN7581，联通 10G-EPON 非对称）"
+            echo ""
+            echo "- 源码 commit：\`${{ env.COMMIT }}\`"
+            echo "- 上游同步：\`${UPSTREAM_SHA:-未同步（tag 构建/关闭）}\`"
+            echo "- honk：\`${HONK_VERSION:-包内 pinned fallback}\`"
+            echo "- 分流内核：**${PROXY}**"
+            echo "- 构建：[run ${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo ""
+            echo "## 文件"
+            echo ""
+            echo '| 文件 | 用途 |'
+            echo '|---|---|'
+            echo '| `*hg5585f-cu*sysupgrade.itb` | CU（测试机）系统镜像；honk 首次验证只刷这个 |'
+            echo '| `*hg5585f-ct*sysupgrade.itb` | CT（主路由/生产机）系统镜像；验证通过前不要刷 |'
+            echo '| `*initramfs-recovery.itb` | 救援镜像，U-Boot 可内存启动 |'
+            echo '| `config.buildinfo` / `config.full` | 本次构建的完整配置 |'
+            echo '| `sha256sums.txt` | 校验和 |'
+            echo ""
+            echo "## 预置"
+            echo ""
+            echo "- PON：\`epon-10g-1g\` + OAM \`ctc\` + \`ge_ports=4\`"
+            echo "- 形态：PPPoE 主路由（\`wan=pon0.995/pppoe/mtu1492\`，\`wan6=dhcpv6\`，\`br-lan=lan1..4\`，LAN \`192.168.31.1/24\`）"
+            echo "- \`pon-watchdog\` 默认启用（兜底上游 Issue #42 的 10G-EPON 冷启动 MPCP 自循环）"
+            echo "- WiFi 默认关闭；UPnP / br_netfilter / EN7572 不启用；BTF 仅在 dae/honk 分流变体启用"
+            echo ""
+            echo "## ⚠ 刷机前置"
+            echo ""
+            echo "1. TTL 串口拿 root，先全分区备份（mtd0/2/5/6/9/13）"
+            echo "2. **本机 factory 转出的 1 MiB 镜像**（APONCAL 光模块校准 + MT7916 EEPROM + MAC/SN）。每台唯一，不能借用别人的"
+            echo "3. U-Boot：\`firstblock.bin\` + \`bl31-u-boot.fip\`"
+            echo "4. 刷完填 LOID（\`pon.line0_oam.loid\`）与 PPPoE 账号（\`network.wan.username/password\`）——都没有预置"
+            echo ""
+            echo "注意：LAN 是 \`192.168.31.1/24\`，与现役 LibWrt 同段。刷之前先把 LibWrt 改成 \`192.168.31.2\` 并关 DHCP。"
+          } > release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RUNNER_TEMP"/out/* --clobber
+          else
+            gh release create "$TAG" "$RUNNER_TEMP"/out/* \
+              --title "HG5585F $TAG（${PROXY}）" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi

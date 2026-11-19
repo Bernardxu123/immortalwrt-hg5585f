@@ -1,0 +1,56 @@
+#!/bin/sh /etc/rc.common
+# AN7581 / HG5585F 中断亲和性修正
+#
+# 背景（2026-10-20 实测）：
+#   本机 GICv3 把 airoha_eth 的主要中断默认全部投给 CPU0。
+#   /proc/interrupts 累计（运行 1d8h）：irq27=124M、irq23=25M、irq19=6M、irq53=17M，
+#   其中 irq19+irq53 全在 CPU0 且**内核禁止用户态改**（见下）。
+#   CPU0 峰值 busy 冲到 94%，而 CPU1/CPU2 几乎闲置 → 负载分布失衡。
+#
+# 可写性实测（逐个写入后读 effective_affinity_list 验证）：
+#   irq 27 (GICv3 70, airoha_eth.4)  → 可写，实测 CPU2 生效，中断计数随即迁移
+#   irq 23 (GICv3 69, airoha_eth.0)  → 可写，实测 CPU1 生效
+#   irq 54 (GICv3 74, 1fb64000.ether) → 可写（量小，不迁）
+#   irq 19 (INTx, mt7915e-hif)       → 写任意 CPU 均 EPERM
+#   irq 53 (MTK3-PCI-MSI, mt7915e)   → 写任意 CPU 均 EPERM（managed MSI，内核不允许）
+#
+#   ⚠️ 陷阱：smp_affinity_list 用的是**十进制 CPU 编号**，不是位图。
+#     写 "8" 表示 CPU8（不存在）→ "Result not representable"。
+#     要 CPU3 就写 "3"。位图格式（f / 0f）只适用于 smp_affinity。
+#
+# 效果（实测，8 路并发 670 Mbps）：
+#   迁移前 678 Mbps / 迁移后 673 Mbps → **吞吐无差异**（该负载下四核合计仅 ~4%，
+#   瓶颈不在此）。本脚本的价值在于削 CPU0 的峰值占用、给突发留余量，
+#   不是提速手段。若只关心 throughput，可不装。
+#
+# 回滚：/etc/init.d/irq-affinity stop  →  对外可见效果即恢复默认（0-3）。
+
+START=25
+USE_PROCD=1
+
+# 5 秒内反复设置：网卡 up/down、firewall reload 可能触发中断重新分配
+apply_affinity() {
+	for i in 1 2 3 4 5; do
+		[ -w /proc/irq/27/smp_affinity_list ] && \
+			echo 2 > /proc/irq/27/smp_affinity_list 2>/dev/null
+		[ -w /proc/irq/23/smp_affinity_list ] && \
+			echo 1 > /proc/irq/23/smp_affinity_list 2>/dev/null
+		sleep 1
+	done
+}
+
+restore_affinity() {
+	for n in 23 27; do
+		[ -w /proc/irq/$n/smp_affinity_list ] && \
+			echo 0-3 > /proc/irq/$n/smp_affinity_list 2>/dev/null
+	done
+}
+
+start_service() { apply_affinity & }
+reload_service() { apply_affinity & }
+stop_service() { restore_affinity; }
+
+service_triggers() {
+	procd_add_reload_trigger "network"
+	procd_add_reload_trigger "firewall"
+}

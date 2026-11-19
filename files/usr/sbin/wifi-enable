@@ -1,0 +1,53 @@
+#!/bin/sh
+# Enable the HG5585F WiFi radios with the same working parameters as QWRT:
+#   country=CN, 2.4G ch11/HE20, 5G ch149/HE80.
+#
+# WiFi is disabled by default because the Xiaomi BE6500 Pro is the AP.
+# This helper is intentionally NOT run by uci-defaults; call it manually.
+#
+# Notes:
+#   - Do not copy QWRT's txpower=100: that is a vendor percentage. mt76 uses dBm.
+#   - ch149 needs country=CN; otherwise it may be NO-IR.
+#   - This does not enable 802.11k/v/r; add those only if you actually use
+#     the HG5585F as a second OpenWrt AP with a steering daemon.
+
+set -e
+
+if ! command -v uci >/dev/null 2>&1 || ! command -v wifi >/dev/null 2>&1; then
+	echo "wifi-enable: this script must run on the router" >&2
+	exit 1
+fi
+
+changed=0
+for r in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	band=$(uci -q get "wireless.$r.band")
+	hwmode=$(uci -q get "wireless.$r.hwmode")
+	case "$band:$hwmode" in
+		2g:*|*:11g)
+			uci set "wireless.$r.channel='11'"
+			uci set "wireless.$r.htmode='HE20'"
+			;;
+		5g:*|*:11a)
+			uci set "wireless.$r.channel='149'"
+			uci set "wireless.$r.htmode='HE80'"
+			;;
+		*)
+			echo "wifi-enable: skip unknown band on $r (band=$band hwmode=$hwmode)" >&2
+			continue
+			;;
+	esac
+	uci set "wireless.$r.country='CN'"
+	uci set "wireless.$r.disabled='0'"
+	changed=$((changed + 1))
+done
+
+if [ "$changed" -eq 0 ]; then
+	echo "wifi-enable: no wifi-device sections found; run 'wifi config' first" >&2
+	exit 1
+fi
+
+uci commit wireless
+wifi reload
+echo "WiFi enabled: country=CN, 2.4G ch11/HE20, 5G ch149/HE80."
+echo "Check: iw reg get; iw dev; iw phy | grep -E 'Band|channel'"
+echo "If 5G is not usable, verify country is applied before changing txpower."
