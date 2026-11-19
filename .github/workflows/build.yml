@@ -551,6 +551,10 @@ jobs:
             exit 1
           fi
 
+      - name: 断言 PON/PPPoE/PPE 链路
+        working-directory: ${{ env.SRC }}
+        run: sh scripts/hg5585f/assert-ppe.sh "$SRC"
+
       # actions/cache 的 Post 保存在 job 失败时会跳过；改用显式 save，失败也保住
       - name: 保存 dl 缓存（失败也保存）
         if: always() && steps.dl-cache.outputs.cache-hit != 'true'
