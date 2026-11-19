@@ -86,16 +86,9 @@ README-HG5585F.md                     本文件
 - `706-04`：flowtable 用 VLAN ID 而非完整 TCI（2026-10-30 已选）
 - DSA host FDB 按端口跟踪（2026-10-30 已选）
 
-**内核 6.18.60：暂缓（本轮保持 6.18.55）**。实测两轮 `.60` 构建都卡在 `kernel-headers` 的补丁阶段：
+**内核 6.18.60：已采用 pbs05 f6977f2（2026-11-16）**。pbs05 已合并 ImmortalWrt 6.18.60，并刷新 `438`/`782`/`675-*`/`706-*` 等补丁；本地 `58822a2` 的 `.55` 回退不再沿用。同步分支 `sync/ponwrt-20261119` 以 f6977f2 为基底重放 HG5585F overlay；构建后用 `scripts/hg5585f/assert-ppe.sh` 验证 `FLOW_ACTION_PPPOE_PUSH`、`706-04`、内核符号与 NPU 固件。若 `hack/951` BBRv3 仍有 fuzz，单独 refresh，不阻塞 PON/PPE 验证。
 
-1. `backport-6.18/438`（spinand QE-bit）Hunk #1 FAILED —— immortalwrt .60 已无此补丁；
-2. 修掉 438 后，`backport-6.18/782`（USB serial Quectel EG060W）Hunk #1/#2 FAILED。
-
-`pending-6.18` 还有 **35 个**与 immortalwrt 有差异的补丁（含 pbs05 自己的 `675` bridge-flowtable 系列），
-`hack/951` BBRv3 也标注 `Base: Linux 6.18.55`。这些要逐个 refresh，或等 pbs05 官方 merge `.60`。
-所以本轮保留 `.55` + 旧的 `pending/699` 前向路径补丁，只把与版本无关的 KASLR 落进来。
-
-**仍不整树 merge**：ImmortalWrt 的 `Merge Official Source` 与 `firewall4` 升级/refresh（本地 firewall4 仍 pin 2025-03-17，会牵动 fullcone 与 bridge-flowtable 补丁）。等 `pbs05/ponwrt` 下一次官方 merge 后再跟。
+**同步策略**：改为“pbs05 f6977f2 基底 + HG5585F overlay 重放”，不再把旧 master 整树 merge 到新基底；这样不会让 `58822a2` 的 6.18.60 回退和 `706-01/03` 删除反向覆盖上游补丁。
 
 ---
 
@@ -121,7 +114,7 @@ README-HG5585F.md                     本文件
 gh workflow run build-hg5585f
 # 默认 sync_upstream=true + update_honk=true；要可复现就显式关掉：
 # gh workflow run build-hg5585f -f sync_upstream=false -f update_honk=false
-# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测）
+# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测，未验证前不要上 CT）
 gh workflow run build-hg5585f -f proxy=none
 # 或打 tag 触发 + 自动发 Release（tag 构建不自动同步上游/honk）
 git tag v2026.10.17-2 && git push origin v2026.10.17-2
@@ -141,7 +134,7 @@ git clone --depth 1 https://github.com/Bernardxu123/immortalwrt-hg5585f
 cd immortalwrt-hg5585f
 ./scripts/feeds update -a && ./scripts/feeds install -a
 sh scripts/hg5585f/gen-config.sh          # 内含 make defconfig + 断言
-# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测）
+# base 变体（无 dae/honk，PPE hw=1 A/B 用；只在 CU 上测，未验证前不要上 CT）
 # PROXY=none sh scripts/hg5585f/gen-config.sh
 make -j$(( $(nproc) + 1 ))
 ```
@@ -171,10 +164,10 @@ git push origin master
 
 - `sync_upstream=true`：构建前 `git fetch` 并 merge `pbs05/ponwrt` 最新 `master`；**冲突直接失败**，不会悄悄选一边；
 - `update_honk=true`：构建前从 `daeuniverse/honk` 拉**最新 release（含 beta）**的 aarch64 musl `stock-full` 资产，自动改写 `package/honk/Makefile` 的版本/URL/hash；API/资产异常时回退到仓库里 pinned 的版本，不阻塞构建；
-- feeds 本来每次 `feeds update -a`，跟默认分支最新；
+- feeds 已在 `feeds.conf.default` 用 `^<SHA>` 全量 pin（2026-11-16 基准）；要跟新需显式改 SHA，不再随 `feeds update -a` 漂移；
 - **tag 构建跳过 `sync_upstream`/`update_honk`**，保证 release 可复现；手动构建的 Release notes 会记录 `上游同步` 和 `honk` 版本。
 
-想要完全可复现时，手动 dispatch 把这两个开关关掉，或把 feeds 钉到固定 commit；想要最新就保持默认。自动 merge 冲突的处理：本地 merge 解决后 commit/push，再重新 dispatch。
+自动 merge 冲突的处理：本地 merge 解决后 commit/push，再重新 dispatch。
 
 ---
 
@@ -318,7 +311,7 @@ python3 scripts/hg5585f/check-factory-eeprom.py 原厂备份-CT/factory-1m.bin
 |---|---|---|
 | 编译收敛 | 12 个 device profile → 2 个 | `PER_DEVICE_ROOTFS=y` 下每个 device 独立内核链接 + 独立 rootfs |
 | 二次构建加速 | `CONFIG_CCACHE=y` + CI 统一用 `$SRC/.ccache` | 改 overlay 后重编从 ~3h 降到 ~1h |
-| **flow offload** | honk/dae：`flow_offloading=1` + `flow_offloading_hw=0`；未装 dae/honk（`PROXY=none/passwall/openclash`）：`1/1` | mainline `airoha_ppe` 支持 `FLOW_ACTION_PPPOE_PUSH`（1 VLAN + 1 PPPoE），路由模式可卸载 PPPoE；honk/dae 的 TC/eBPF 可能被硬件卸载旁路，故保守 `hw=0`；**QWRT 7.3 vendor 模块无 PPPoE 封装，其 `flow_offloading=0` 铁律不适用本固件** |
+| **flow offload** | honk/dae：`flow_offloading=1` + `flow_offloading_hw=0`；未装 dae/honk（`PROXY=none/passwall/openclash`）：`1/1` | mainline `airoha_ppe` 支持 `FLOW_ACTION_PPPOE_PUSH`（1 VLAN + 1 PPPoE）；honk/dae 的 TC/eBPF 可能被硬件卸载旁路，故保守 `hw=0`；**QWRT vendor 模块无 PPPoE 封装，其 `flow_offloading=0` 铁律不适用本固件**。6.18.60 的 `hw=1` 尚未在 CU/CT 实测；7.3.1 b56 缺 `706-01/03/04` 与 `675-02/06`，不能作为 7.3.1 驱动能力的判据 |
 | 不装 br_netfilter | `kmod-br-netfilter` 保持 not set | 桥接帧进 iptables 的元凶；与 `nf_conntrack_bridge` 是两回事 |
 | PON 参数预设 | `mode=epon-10g-1g`、`operator=ctc`、`ge_ports=4` | 原厂 `current_ponmode=EPON_10G`、`port_num=4` |
 | WiFi 默认关 | radio `disabled=1` | 小米 BE6500 Pro 继续做 AP；避免同一空间双 AP 干扰 |
@@ -392,7 +385,7 @@ cat /tmp/pon-watchdog.log
 | 项 | 默认 | 切法 |
 |---|---|---|
 | EPON OAM profile | `ctc` | `uci set pon.line0_oam.operator='ieee'` |
-| 硬件 flow offload | `flow_offloading_hw=1` | 吞吐反而下降就 `uci set firewall.@defaults[0].flow_offloading_hw='0'` |
+| 硬件 flow offload | `PROXY=none` 默认 `1`；honk/dae 默认 `0` | 先 CU 跑 `PROXY=none` A/B；验收看 softirq/NET_RX 下降 + `conntrack` `[OFFLOAD]` 计数停涨 + 吞吐 ≥98% 基线；异常回 `hw=0` |
 | IPv6 | 开 | `uci set network.wan.ipv6='0'; uci delete network.wan6` + `uci set network.lan.ipv6='0'` |
 | WiFi | 关 | `wifi-enable`（自动设 CN/ch11 HE20/ch149 HE80）；或手工 `uci set ...disabled='0'` + `wifi reload` |
 | zram | 开 | `uci set system.zram.enabled='0'` 或停用 `zram-swap` |
@@ -404,7 +397,9 @@ cat /tmp/pon-watchdog.log
 2. PPPoE 在 `pon0.995` 上能否拨通（UCI MTU/MRU 1500；pppd 协商 1492）
 3. `ifdown wan` + 删 `pon0.995` + 模块重载后，`ifup wan` 能否干净重建 VLAN
 4. `mpcp_timeouts` 在正常注册与故障自循环下的实际斜率
-5. `flow_offloading_hw` 在 AN7581 路由模式下是否真的带上 `flags offload`（`nft list flowtable inet fw4` / PPE debugfs）
+5. `flow_offloading_hw` 在 AN7581 路由模式下是否真的带上 `flags offload`，且 `ppe/entries` 出现 `pppoe-wan` 出口流（`nft list flowtable inet fw4` / PPE debugfs）；6.18.60 未实测，7.3.1 b56 因缺 706/675 不能作为有效判据
+
+**PON PPE 硬件卸载现状（2026-11-19）**：闭源 QWRT 11.10 `hw=0` 8 流 932.3 Mbps、`hw=1` 600.7 Mbps；`nft -c` 拒收 `pppoe-wan`/`pon0.995`/`br-lan`，只有物理口可进硬件 flowtable，闭源线不可外部修复。6.18.60 已具备 `FLOW_ACTION_PPPOE_PUSH` + 922/925/927/928，但 CU/CT 的 `hw=1` 仍未实测。验收以 **softirq/NET_RX 下降 + `conntrack` `[OFFLOAD]` 计数停涨 + 吞吐 ≥98% 基线** 为主；`CONFIG_NET_AIROHA_FLOW_STATS=n` 时不要依赖 `ppe` 包计数。CT 2.5G 只由 QWRT 现网验证过，自建 CT 的 `lan1` 未实机验证；DSH 服务未在本仓库实现，只有 nginx/DDNS 前置包。
 
 **flow offload 与 tproxy 的关系**：硬件卸载（`flags offload`）会把被代理的流直接甩给
 PPE，绕开 tproxy，表现为"部分站点直连、规则不生效"。所以 `99-hg5585f-setup` 在检测到
