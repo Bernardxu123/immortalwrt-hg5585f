@@ -22,21 +22,24 @@ need_unset() {
 	grep -Eq "^CONFIG_$1=[ym]" "$kcfg" && err "CONFIG_$1 不应启用"
 }
 
-ppe=$(find "$src/build_dir" -type f -path '*/linux-*/drivers/net/ethernet/airoha/airoha_ppe.c' 2>/dev/null | head -1)
+ppe=$(find "$src/build_dir" -type f -path '*/linux-airoha_an7581*/linux-*/drivers/net/ethernet/airoha/airoha_ppe.c' 2>/dev/null | head -1)
+echo "airoha_ppe=$ppe"
 if [ -z "$ppe" ]; then
 	err "找不到 airoha_ppe.c"
 else
 	grep -q 'FLOW_ACTION_PPPOE_PUSH' "$ppe" || err "airoha_ppe.c 缺少 FLOW_ACTION_PPPOE_PUSH"
 fi
 
-nf=$(find "$src/build_dir" -type f -path '*/linux-*/net/netfilter/nf_flow_table_offload.c' 2>/dev/null | head -1)
+nf=$(find "$src/build_dir" -type f -path '*/linux-airoha_an7581*/linux-*/net/netfilter/nf_flow_table_offload.c' 2>/dev/null | head -1)
+echo "nf_flow_table_offload=$nf"
 if [ -z "$nf" ]; then
 	err "找不到 nf_flow_table_offload.c"
 else
 	grep -q 'vlan_id' "$nf" || err "nf_flow_table_offload.c 缺少 706-04 VLAN ID 修复"
 fi
 
-kcfg=$(find "$src/build_dir" -type f -path '*/linux-*/.config' 2>/dev/null | head -1)
+kcfg=$(find "$src/build_dir" -type f -path '*/linux-airoha_an7581*/linux-*/.config' 2>/dev/null | head -1)
+echo "kernel_config=$kcfg"
 if [ -z "$kcfg" ]; then
 	err "找不到内核 .config"
 else
